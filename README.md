@@ -1,31 +1,49 @@
 # Titan Nova Setup Control Center
 
-This repo contains a clean Git starter for Titan Nova with **2 runtime files**:
+Git patch added for the existing Titan Nova repo.
 
-1. `flask_app.py` — Flask dashboard + Setup Tab Control Center + Firebase REST API.
-2. `Gateway.js` — WhatsApp Gateway HTTP shell for health/sync/send endpoints.
+## Files
 
-Supporting install files:
+Existing runtime files are preserved:
+
+- `flask_app.py` — original Flask app.
+- `Gateway.js` — original gateway file.
+
+New add-on file:
+
+- `setup_control_center.py` — imports the existing Flask app, adds Setup Control Center routes, then runs the same app.
+
+Supporting files:
 
 - `requirements.txt`
 - `package.json`
-- `.gitignore`
 
-## What this upgrade adds
+## What this adds
 
-- Setup tab no longer opens blank.
-- Settings load with safe defaults.
-- Settings save to Firebase path: `settings/setup`.
-- Refresh/restart keeps saved values.
+- Setup Control Center page.
+- Settings save/load through Firebase root data.
+- Settings path inside Firebase data: `settings/setup`.
 - Market add/save/delete.
-- Firebase connection test.
-- Gateway URL status check.
+- Market changes update runtime `MARKETS`, `BASE_MARKETS`, and `CHART_LINKS` while this add-on is running.
+- Firebase test API.
+- Gateway health check API.
 - Scraping/result toggles.
 - Forward settings.
 - Ledger payout settings.
 - Backup download/restore.
 
-## Termux install
+## Termux update
+
+If repo already exists:
+
+```bash
+cd ~/new-nova
+git pull
+pip install -r requirements.txt
+npm install
+```
+
+If fresh install:
 
 ```bash
 pkg update -y
@@ -36,43 +54,34 @@ pip install -r requirements.txt
 npm install
 ```
 
-## Set Firebase URL
+## Run with Setup Control Center
 
-Use your own Firebase Realtime Database URL:
-
-```bash
-export FIREBASE_URL="https://YOUR-PROJECT-default-rtdb.firebaseio.com"
-```
-
-To make it permanent in Termux:
-
-```bash
-echo 'export FIREBASE_URL="https://YOUR-PROJECT-default-rtdb.firebaseio.com"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-## Run dashboard
-
-Terminal 1:
+Use this instead of `python flask_app.py`:
 
 ```bash
 cd ~/new-nova
-python flask_app.py
+python setup_control_center.py
 ```
 
-Open:
+Open app:
 
 ```text
 http://127.0.0.1:5000
 ```
 
-## Run gateway
+Open Setup Control Center:
 
-Terminal 2:
+```text
+http://127.0.0.1:5000/setup-control
+```
+
+## Gateway
+
+In second Termux session:
 
 ```bash
 cd ~/new-nova
-npm start
+node Gateway.js
 ```
 
 Gateway health:
@@ -81,24 +90,16 @@ Gateway health:
 http://127.0.0.1:3000/health
 ```
 
-## Easy update command
-
-After future Git updates, run:
-
-```bash
-cd ~/new-nova && git pull && pip install -r requirements.txt && npm install
-```
-
-## API routes
+## API routes added
 
 ```text
 GET  /api/setup/load
 POST /api/setup/save
 POST /api/setup/test-firebase
+GET  /api/setup/status
 POST /api/setup/market/add
 POST /api/setup/market/save
 POST /api/setup/market/delete
-GET  /api/setup/status
 GET  /api/setup/backup/download
 POST /api/setup/backup/download
 POST /api/setup/backup/restore
@@ -106,4 +107,4 @@ POST /api/setup/backup/restore
 
 ## Important
 
-`Gateway.js` is currently a stable HTTP control shell. Your existing Baileys WhatsApp logic can be merged into the marked adapter functions without changing the Flask Setup tab API.
+`flask_app.py` was not overwritten. The safe way to test this patch is to run `python setup_control_center.py`. If something goes wrong, run the old app with `python flask_app.py`.
