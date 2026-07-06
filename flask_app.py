@@ -522,6 +522,8 @@ def _write_custom_market(state_obj, rec):
     settings = state_obj.setdefault('settings', {})
     setup = settings.setdefault('setup', {})
     markets_cfg = settings.setdefault('markets', {})
+    get_setup_state(state_obj)
+    setup.setdefault('markets', {}).setdefault('customMarkets', {})[rec['market']] = rec
     setup.setdefault('customMarkets', {})[rec['market']] = rec
     markets_cfg.setdefault('customMarkets', {})[rec['market']] = rec
     aliases = set(rec.get('aliases') or _market_aliases(rec.get('market')))
@@ -1510,6 +1512,67 @@ def api_save_entry_safety():
     save_to_firebase(state)
     return jsonify({'status': 'success', 'entrySettings': entry, 'riskSettings': risk})
 
+
+
+def normalize_market_name(name):
+    return _normalize_market_name(name)
+
+def market_aliases(name):
+    return _market_aliases(name)
+
+def _default_setup_state():
+    return {
+        "markets": {"customMarkets": {}, "deletedMarkets": [], "marketSettings": {}},
+        "timeRules": {"dayBoundaryTime":"06:00","acceptBeforeMarketTime":True,"rejectAfterMarketTime":True,"dailyRepeatSchedule":True,"separateOpenCloseStage":True},
+        "scrapeSettings": {"autoScrapeEnabled": True, "scrapeIntervalMinutes": 5, "confirmCount": 2, "ignoreOldFullResult": True, "openFormatHelper":"123-4", "closeFormatHelper":"123-45-678"},
+        "forwardSettings": {"enabled": False, "scheduleTime":"18:00", "selectedMarket":"", "targets":[], "gameTypes":["ANK","JODI","PENEL"], "includeEmptyTypes":False, "maxRows":80},
+        "gatewaySettings": {"gatewayUrl":"http://127.0.0.1:3000"},
+        "walletSettings": {}, "paymentSettings": {},
+        "riskSettings": {}, "guardSettings": {},
+        "backupSettings": {"lastBackupAt":"", "autoBackup": False, "backupBeforeDangerousAction": True},
+        "updatedAt": ""
+    }
+
+def get_setup_state(state):
+    _ensure_foundation_state(state)
+    settings = state.setdefault('settings', {})
+    setup = settings.setdefault('setup', {})
+    defaults = _default_setup_state()
+    for k, v in defaults.items():
+        if k not in setup or not isinstance(setup.get(k), type(v)):
+            setup[k] = json.loads(json.dumps(v))
+    legacy_custom = setup.pop('customMarkets', None)
+    legacy_deleted = setup.pop('deletedMarkets', None)
+    if isinstance(legacy_custom, dict): setup['markets'].setdefault('customMarkets', {}).update(legacy_custom)
+    if isinstance(legacy_deleted, list): setup['markets']['deletedMarkets'] = sorted(set(setup['markets'].get('deletedMarkets', []) + legacy_deleted))
+    markets_cfg = settings.setdefault('markets', {})
+    for src in (markets_cfg.get('customMarkets'),):
+        if isinstance(src, dict): setup['markets'].setdefault('customMarkets', {}).update(src)
+    deleted = sorted(set(_deleted_markets(state) + setup['markets'].get('deletedMarkets', [])))
+    setup['markets']['deletedMarkets'] = deleted
+    setup['customMarkets'] = setup['markets']['customMarkets']
+    setup['deletedMarkets'] = deleted
+    setup['walletSettings'] = {**setup.get('walletSettings', {}), **state.get('walletSettings', {})}
+    setup['paymentSettings'] = {**setup.get('paymentSettings', {}), **state.get('paymentSettings', {})}
+    setup['riskSettings'] = {**setup.get('riskSettings', {}), **state.get('riskSettings', {})}
+    setup['guardSettings'] = {**setup.get('guardSettings', {}), **state.get('spamGuardSettings', {})}
+    return setup
+
+def save_setup_state(state, setup):
+    cur = get_setup_state(state)
+    for k, v in (setup or {}).items():
+        if isinstance(v, dict) and isinstance(cur.get(k), dict): cur[k].update(v)
+        else: cur[k] = v
+    cur['updatedAt'] = _now_iso_local()
+    state.setdefault('settings', {})['setup'] = cur
+    state.setdefault('settings', {}).setdefault('markets', {})['customMarkets'] = cur.get('markets', {}).get('customMarkets', {})
+    state['settings']['markets']['deletedMarkets'] = cur.get('markets', {}).get('deletedMarkets', [])
+    state['walletSettings'] = {**state.get('walletSettings', _default_wallet_settings()), **cur.get('walletSettings', {})}
+    state['paymentSettings'] = {**state.get('paymentSettings', _default_payment_settings()), **cur.get('paymentSettings', {})}
+    state['riskSettings'] = {**state.get('riskSettings', _default_risk_settings()), **cur.get('riskSettings', {})}
+    state['spamGuardSettings'] = {**state.get('spamGuardSettings', _default_spam_guard_settings()), **cur.get('guardSettings', {})}
+    return cur
+
 @app.route('/api/risk_settings', methods=['POST'])
 def api_risk_settings():
     data = request.json or {}
@@ -1527,6 +1590,60 @@ def api_risk_settings():
     save_to_firebase(state)
     return jsonify({'status': 'success', 'riskSettings': settings})
 
+
+
+@app.route('/api/setup/load')
+def api_setup_load():
+    state = migrate_and_get_state()
+    setup = get_setup_state(state)
+    status = _setup_status_payload(state)
+    return jsonify({'status':'success','setup':setup,'marketRegistry':get_active_market_registry(state),'systemStatus':status,'audit':_recent_setup_audit(state)})
+
+@app.route('/api/setup/save', methods=['POST'])
+def api_setup_save():
+    data = request.json or {}
+    state = migrate_and_get_state()
+    setup = save_setup_state(state, data.get('setup') if 'setup' in data else data)
+    action = str(data.get('auditAction') or 'setup_save')
+    if action not in {'setup_save','gateway_setting_save','risk_setting_save','guard_setting_save'}:
+        action = 'setup_save'
+    _add_audit(state, action, {'setupKeys': list((data.get('setup') if 'setup' in data else data).keys())})
+    save_to_firebase(state)
+    return jsonify({'status':'success','message':'Setup settings saved.','setup':setup,'marketRegistry':get_active_market_registry(state)})
+
+def _setup_status_payload(state):
+    now = datetime.datetime.now()
+    setup = get_setup_state(state)
+    boundary = setup.get('timeRules', {}).get('dayBoundaryTime') or '06:00'
+    return {'firebaseUrlStatus':'READY' if FIREBASE_URL else 'SETUP','lastSyncTime':state.get('lastSyncTime') or setup.get('updatedAt') or '', 'gatewayOnline':bool(state.get('gatewayOnline') or state.get('waStatus',{}).get('online')), 'whatsappConnected':bool(state.get('whatsappConnected') or state.get('waStatus',{}).get('connected')), 'currentAppDate':_safe_today(), 'currentTime':now.strftime('%H:%M:%S'), 'dayBoundaryTime':boundary, 'dayBoundaryStatus':('PREVIOUS DAY LOOP' if now.strftime('%H:%M') < boundary else 'CURRENT DAY LOOP')}
+
+def _recent_setup_audit(state):
+    names = {'setup_save','market_add','market_save','market_delete','backup_download','backup_restore','gateway_setting_save','risk_setting_save','guard_setting_save'}
+    return [a for a in reversed(state.get('auditLog', [])) if a.get('action') in names][:25]
+
+@app.route('/api/setup/status')
+def api_setup_status():
+    state = migrate_and_get_state()
+    return jsonify({'status':'success', **_setup_status_payload(state)})
+
+@app.route('/api/setup/backup/download', methods=['POST'])
+def api_setup_backup_download():
+    state = migrate_and_get_state()
+    setup = get_setup_state(state)
+    setup.setdefault('backupSettings', {})['lastBackupAt'] = _now_iso_local()
+    _add_audit(state, 'backup_download', {'at': setup['backupSettings']['lastBackupAt']})
+    save_to_firebase(state)
+    return jsonify({'status':'success','backup':setup,'downloadedAt':setup['backupSettings']['lastBackupAt']})
+
+@app.route('/api/setup/backup/restore', methods=['POST'])
+def api_setup_backup_restore():
+    data = request.json or {}
+    restore = data.get('setup') or data.get('backup') or data
+    state = migrate_and_get_state()
+    setup = save_setup_state(state, restore)
+    _add_audit(state, 'backup_restore', {'at': _now_iso_local()})
+    save_to_firebase(state)
+    return jsonify({'status':'success','message':'Setup backup restored.','setup':setup})
 
 
 @app.route('/api/setup/market/add', methods=['POST'])
@@ -1596,6 +1713,8 @@ def api_setup_market_delete():
     setup = state.setdefault('settings', {}).setdefault('setup', {})
     markets_cfg = state.setdefault('settings', {}).setdefault('markets', {})
     deleted = sorted(set(_deleted_markets(state) + aliases))
+    get_setup_state(state)
+    setup.setdefault('markets', {})['deletedMarkets'] = deleted
     setup['deletedMarkets'] = deleted
     markets_cfg['deletedMarkets'] = deleted
     state['deletedMarkets'] = deleted
@@ -4704,6 +4823,33 @@ TOTAL: 300</pre>
         }
         // ────────────────────────────────────────────────────────
 
+
+        function setupEsc(v){ return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+        function setupDefaults(){ return {markets:{customMarkets:{},deletedMarkets:[],marketSettings:{}},timeRules:{dayBoundaryTime:'06:00',acceptBeforeMarketTime:true,rejectAfterMarketTime:true,dailyRepeatSchedule:true,separateOpenCloseStage:true},scrapeSettings:{autoScrapeEnabled:true,scrapeIntervalMinutes:5,confirmCount:2,ignoreOldFullResult:true},forwardSettings:{enabled:false,scheduleTime:'18:00',selectedMarket:'',targets:[],gameTypes:['ANK','JODI','PENEL'],includeEmptyTypes:false,maxRows:80},gatewaySettings:{gatewayUrl:'http://127.0.0.1:3000'},walletSettings:{},paymentSettings:{},riskSettings:{},guardSettings:{},backupSettings:{autoBackup:false,backupBeforeDangerousAction:true,lastBackupAt:''}}; }
+        function setupState(){ appState.settings=appState.settings||{}; appState.settings.setup={...setupDefaults(), ...(appState.settings.setup||{})}; return appState.settings.setup; }
+        async function loadSetupSettings(){ try{ const r=await fetch('/api/setup/load'); const d=await r.json(); if(d.status!=='success') throw new Error(d.message||'Load failed'); appState.settings=appState.settings||{}; appState.settings.setup=d.setup; appState.setupStatus=d.systemStatus||{}; appState.setupAudit=d.audit||[]; appState.setupLoaded=true; showRealNotification('✅ Setup Ready','Setup control center refreshed.','success'); render(true);}catch(e){appState.setupLoadError=String(e.message||e); showRealNotification('❌ Setup Load',appState.setupLoadError,'danger'); render(true);} }
+        function setupCollect(){ const s=setupState(); const val=id=>document.getElementById(id)?.value; const chk=id=>!!document.getElementById(id)?.checked; s.timeRules={dayBoundaryTime:val('set-boundary')||'06:00',acceptBeforeMarketTime:chk('set-accept-before'),rejectAfterMarketTime:chk('set-reject-after'),dailyRepeatSchedule:chk('set-repeat'),separateOpenCloseStage:chk('set-separate')}; s.scrapeSettings={autoScrapeEnabled:chk('set-scrape-auto'),scrapeIntervalMinutes:Number(val('set-scrape-int')||5),confirmCount:Number(val('set-confirm-count')||2),ignoreOldFullResult:chk('set-ignore-old'),openFormatHelper:'123-4',closeFormatHelper:'123-45-678'}; s.forwardSettings={enabled:chk('set-forward-enabled'),scheduleTime:val('set-forward-time')||'18:00',selectedMarket:val('set-forward-market')||'',targets:[val('set-forward-target')||''].filter(Boolean),gameTypes:['ANK','JODI','PENEL'].filter(x=>chk('set-gt-'+x)),includeEmptyTypes:chk('set-empty-types'),maxRows:Number(val('set-max-rows')||80)}; s.gatewaySettings={gatewayUrl:val('set-gateway-url')||''}; s.walletSettings={enabled:chk('set-wallet-enabled'),defaultCreditLimit:Number(val('set-credit-limit')||0),requirePositiveBalance:chk('set-positive-balance')}; s.paymentSettings={automationEnabled:chk('set-pay-auto'),requireUtr:chk('set-require-utr'),duplicateUtrBlock:chk('set-dup-utr'),approveCreditsWallet:chk('set-approve-credit'),minAmount:Number(val('set-min-amount')||0),maxAmount:Number(val('set-max-amount')||0)}; s.riskSettings={riskLimitEnabled:chk('set-risk-enabled'),marketDailyLimit:Number(val('set-market-limit')||0),digitDailyLimit:Number(val('set-digit-limit')||0),userDailyLimit:Number(val('set-user-limit')||0),warningPercent:Number(val('set-warning-percent')||80),autoLockOnLimit:chk('set-auto-lock')}; s.guardSettings={enabled:chk('set-spam-guard'),linkGuardEnabled:chk('set-link-guard'),forwardGuardEnabled:chk('set-forward-guard'),deleteMessage:chk('set-delete-msg'),kickEnabled:chk('set-kick'),strikeLimit:Number(val('set-strike-limit')||3),alertMessage:val('set-alert-msg')||'',warningMessage:val('set-warning-msg')||'',kickMessage:val('set-kick-msg')||''}; s.backupSettings={lastBackupAt:s.backupSettings?.lastBackupAt||'',autoBackup:chk('set-auto-backup'),backupBeforeDangerousAction:chk('set-backup-danger')}; return s; }
+        async function saveSetupSettings(action='setup_save'){ try{ const setup=setupCollect(); const r=await fetch('/api/setup/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({setup,auditAction:action})}); const d=await r.json(); if(d.status!=='success') throw new Error(d.message||'Save failed'); appState.settings.setup=d.setup; showRealNotification('✅ Saved',d.message||'Setup saved.','success'); await loadSetupSettings(); }catch(e){showRealNotification('❌ Save Error',String(e.message||e),'danger');} }
+        function setupAddPayload(prefix){ return {marketName:normalizeMarketName(document.getElementById(prefix+'name')?.value||''),openTime:document.getElementById(prefix+'open')?.value||'',closeTime:document.getElementById(prefix+'close')?.value||'',resultUrl:document.getElementById(prefix+'url')?.value||'',enabled:!!document.getElementById(prefix+'enabled')?.checked,scrapeEnabled:!!document.getElementById(prefix+'scrape')?.checked,forwardEnabled:!!document.getElementById(prefix+'forward')?.checked}; }
+        async function setupAddMarket(){ try{ const payload=setupAddPayload('new-market-'); const r=await fetch('/api/setup/market/add',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(d.status!=='success') throw new Error(d.message||'Add failed'); showRealNotification('✅ Market Added',d.message,'success'); await loadSetupSettings(); }catch(e){showRealNotification('❌ Market Add',String(e.message||e),'danger');} }
+        async function setupSaveMarket(m){ try{ const id='mk-'+normalizeMarketName(m).replace(/[^A-Z0-9]/g,'-')+'-'; const payload=setupAddPayload(id); payload.marketName=m; const r=await fetch('/api/setup/market/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const d=await r.json(); if(d.status!=='success') throw new Error(d.message||'Save failed'); showRealNotification('✅ Market Saved',d.message,'success'); await loadSetupSettings(); }catch(e){showRealNotification('❌ Market Save',String(e.message||e),'danger');} }
+        async function setupDeleteMarket(m){ const typed=prompt('This will permanently delete this market from all app data, entries, results, schedules and forwarding. Type DELETE to confirm.'); if(typed!=='DELETE') return showRealNotification('⚠️ Cancelled','Market delete cancelled.','danger'); try{ const r=await fetch('/api/setup/market/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({marketName:m,confirmHardDelete:true})}); const d=await r.json(); if(d.status!=='success') throw new Error(d.message||'Delete failed'); showRealNotification('🗑️ Deleted',d.message,'success'); await loadSetupSettings(); setTimeout(()=>location.reload(),600); }catch(e){showRealNotification('❌ Delete',String(e.message||e),'danger');} }
+        async function setupDownloadBackup(){ const r=await fetch('/api/setup/backup/download',{method:'POST'}); const d=await r.json(); const blob=new Blob([JSON.stringify(d.backup||{},null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='setup-backup.json'; a.click(); await loadSetupSettings(); }
+        async function setupRestoreBackup(){ try{ const raw=prompt('Paste setup backup JSON'); if(!raw) return; const backup=JSON.parse(raw); const r=await fetch('/api/setup/backup/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backup})}); const d=await r.json(); if(d.status!=='success') throw new Error(d.message||'Restore failed'); showRealNotification('✅ Restored','Setup backup restored.','success'); await loadSetupSettings(); }catch(e){showRealNotification('❌ Restore',String(e.message||e),'danger');} }
+        function setupSection(icon,title,body){ return `<div class="native-card p-4 mb-3"><div class="flex items-center gap-2 mb-3"><i class="fas ${icon} text-[var(--primary)]"></i><h3 class="text-white font-black text-[12px] uppercase">${title}</h3></div>${body}</div>`; }
+        function renderSetupTab(){ const s=setupState(); if(!appState.setupLoaded && !appState.setupLoading){ appState.setupLoading=true; setTimeout(()=>loadSetupSettings().finally(()=>appState.setupLoading=false),20); } const st=appState.setupStatus||{}; const registry=((appState.settings?.setup?.markets?.customMarkets&&Object.values(appState.settings.setup.markets.customMarkets))||[]); const all=activeMarketsList(baseMarkets).map(x=>({market:x.n,openTime:x.openTime||'',closeTime:x.closeTime||'',enabled:true,scrapeEnabled:true,forwardEnabled:true,resultUrl:''})).concat(registry).filter(x=>!isDeletedMarketName(x.market||x.name||x.n)); const opts=all.map(x=>`<option value="${setupEsc(x.market||x.name||x.n)}">${setupEsc(x.market||x.name||x.n)}</option>`).join(''); const marketCards=all.map(m=>{ const name=m.market||m.name||m.n; const id='mk-'+normalizeMarketName(name).replace(/[^A-Z0-9]/g,'-')+'-'; return `<div class="bg-[var(--surface-light)] border border-[var(--border)] rounded-2xl p-3 mb-2"><div class="flex justify-between"><b class="text-white text-[12px]">${setupEsc(name)}</b><span class="text-[9px] font-black ${m.enabled!==false?'text-[var(--green)]':'text-[var(--rose)]'}">${m.enabled!==false?'ON':'OFF'}</span></div><div class="grid grid-cols-2 gap-2 mt-2"><input id="${id}open" type="time" class="native-input text-[11px]" value="${setupEsc(m.openTime||'')}"><input id="${id}close" type="time" class="native-input text-[11px]" value="${setupEsc(m.closeTime||'')}"><input id="${id}url" class="native-input text-[11px] col-span-2" placeholder="Result URL" value="${setupEsc(m.resultUrl||'')}"></div><div class="grid grid-cols-3 gap-1 my-2">${['enabled','scrape','forward'].map((k,i)=>`<label class="text-[9px] text-white"><input id="${id}${k}" type="checkbox" ${[m.enabled!==false,m.scrapeEnabled!==false,m.forwardEnabled!==false][i]?'checked':''}> ${k}</label>`).join('')}</div><div class="grid grid-cols-2 gap-2"><button onclick="setupSaveMarket('${setupEsc(name)}')" class="bg-[var(--green)] text-white py-2 rounded-xl text-[10px] font-black">Save</button><button onclick="setupDeleteMarket('${setupEsc(name)}')" class="bg-[var(--rose)] text-white py-2 rounded-xl text-[10px] font-black">Delete</button></div></div>`; }).join(''); return `<div class="p-3 pb-24"><div class="sticky top-0 z-20 bg-[var(--bg)]/95 backdrop-blur py-3 mb-2"><h2 class="text-white font-black text-lg">⚙️ Setup Control Center</h2><p class="text-[10px] text-[var(--text-muted)]">Master app-wide Firebase settings.</p></div>${appState.setupLoadError?`<div class="native-card p-3 text-[var(--rose)] text-xs mb-3">${setupEsc(appState.setupLoadError)}</div>`:''}`+
+        setupSection('fa-server','Firebase / System Status',`<div class="grid grid-cols-2 gap-2 text-[10px]"><div class="stat-box"><div class="stat-lbl">Firebase</div><div class="stat-val">${st.firebaseUrlStatus||'READY'}</div></div><div class="stat-box"><div class="stat-lbl">Gateway</div><div class="stat-val">${st.gatewayOnline?'ON':'OFF'}</div></div><div class="stat-box"><div class="stat-lbl">WhatsApp</div><div class="stat-val">${st.whatsappConnected?'READY':'SETUP'}</div></div><div class="stat-box"><div class="stat-lbl">Time</div><div class="stat-val">${st.currentTime||''}</div></div></div><p class="text-[10px] text-[var(--text-muted)] mt-2">Date ${st.currentAppDate||currentDate} · Boundary ${st.dayBoundaryTime||'06:00'} · ${st.dayBoundaryStatus||''} · Last sync ${st.lastSyncTime||'Never'}</p><div class="grid grid-cols-4 gap-1 mt-3"><button onclick="loadSetupSettings()" class="bg-[var(--surface-light)] text-white rounded-lg py-2 text-[9px]">Test Firebase</button><button onclick="fetch('/api/setup/status').then(()=>showRealNotification('✅ Gateway Test','Status checked','success'))" class="bg-[var(--surface-light)] text-white rounded-lg py-2 text-[9px]">Test Gateway</button><button onclick="loadSetupSettings()" class="bg-[var(--primary)] text-white rounded-lg py-2 text-[9px]">Refresh</button><button onclick="saveSetupSettings()" class="bg-[var(--green)] text-white rounded-lg py-2 text-[9px]">Save All</button></div>`)+
+        setupSection('fa-store','Market Control Center',`${marketCards}<div class="bg-[rgba(0,194,111,.06)] border border-[rgba(0,194,111,.25)] rounded-2xl p-3"><b class="text-white text-[12px]">Add New Market</b><input id="new-market-name" class="native-input text-[11px] mt-2" placeholder="Market Name"><div class="grid grid-cols-2 gap-2 mt-2"><input id="new-market-open" type="time" class="native-input text-[11px]"><input id="new-market-close" type="time" class="native-input text-[11px]"></div><input id="new-market-url" class="native-input text-[11px] mt-2" placeholder="Result URL"><div class="grid grid-cols-3 gap-1 my-2"><label class="text-[9px] text-white"><input id="new-market-enabled" type="checkbox" checked> Enabled</label><label class="text-[9px] text-white"><input id="new-market-scrape" type="checkbox" checked> Scrape</label><label class="text-[9px] text-white"><input id="new-market-forward" type="checkbox" checked> Forward</label></div><button onclick="setupAddMarket()" class="w-full bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Add Market</button></div>`)+
+        setupSection('fa-clock','Time Loop / Entry Rules',`<div class="grid grid-cols-2 gap-2"><input id="set-boundary" type="time" class="native-input" value="${s.timeRules.dayBoundaryTime||'06:00'}">${[['set-accept-before','Entry accept before market time',s.timeRules.acceptBeforeMarketTime],['set-reject-after','Reject after market time',s.timeRules.rejectAfterMarketTime],['set-repeat','Daily repeat schedule',s.timeRules.dailyRepeatSchedule],['set-separate','Open/Close separate stage',s.timeRules.separateOpenCloseStage]].map(x=>toggleRow(x[0],x[1],x[2])).join('')}</div><button onclick="saveSetupSettings()" class="mt-2 w-full bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Save Time Rules</button>`)+
+        setupSection('fa-magnifying-glass-chart','Result Scraping Control',`${toggleRow('set-scrape-auto','Auto scrape',s.scrapeSettings.autoScrapeEnabled)}<div class="grid grid-cols-2 gap-2 mt-2"><input id="set-scrape-int" type="number" class="native-input" value="${s.scrapeSettings.scrapeIntervalMinutes||5}"><input id="set-confirm-count" type="number" class="native-input" value="${s.scrapeSettings.confirmCount||2}"></div>${toggleRow('set-ignore-old','Ignore old full result',s.scrapeSettings.ignoreOldFullResult)}<p class="text-[10px] text-[var(--text-muted)] mt-2">Open: 123-4 · Close: 123-45-678</p><button onclick="saveSetupSettings()" class="mt-2 w-full bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Save Scrape Settings</button>`)+
+        setupSection('fa-paper-plane','Forward / Schedule Sender Control',`${toggleRow('set-forward-enabled','Forward enabled',s.forwardSettings.enabled)}<div class="grid grid-cols-2 gap-2 mt-2"><input id="set-forward-time" type="time" class="native-input" value="${s.forwardSettings.scheduleTime||'18:00'}"><select id="set-forward-market" class="native-input"><option value="">Select Market</option>${opts}</select></div><input id="set-forward-target" class="native-input mt-2" placeholder="Target group/private JID" value="${setupEsc((s.forwardSettings.targets||[])[0]||'')}"><div class="grid grid-cols-3 gap-1 mt-2">${['ANK','JODI','PENEL'].map(gt=>`<label class="text-white text-[9px]"><input id="set-gt-${gt}" type="checkbox" ${(s.forwardSettings.gameTypes||[]).includes(gt)?'checked':''}> ${gt}</label>`).join('')}</div>${toggleRow('set-empty-types','Include empty types',s.forwardSettings.includeEmptyTypes)}<input id="set-max-rows" type="number" class="native-input mt-2" value="${s.forwardSettings.maxRows||80}"><div class="grid grid-cols-2 gap-2 mt-2"><button onclick="saveSetupSettings()" class="bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Save Forward Settings</button><button onclick="sendLoadReportNow()" class="bg-[var(--primary)] text-white py-3 rounded-xl text-[10px] font-black">Test Send</button></div>`)+
+        setupSection('fa-whatsapp','WhatsApp / Gateway Control',`<input id="set-gateway-url" class="native-input" value="${setupEsc(s.gatewaySettings.gatewayUrl||'')}"><p class="text-[10px] text-[var(--text-muted)] mt-2">WhatsApp: ${st.whatsappConnected?'READY':'SETUP'} · QR: ${st.whatsappConnected?'PAIRED':'WAITING'}</p><div class="grid grid-cols-2 gap-2 mt-2"><button onclick="syncForwardTargets()" class="bg-[var(--surface-light)] text-white py-2 rounded-xl text-[10px]">Sync Groups</button><button onclick="syncForwardTargets()" class="bg-[var(--surface-light)] text-white py-2 rounded-xl text-[10px]">Sync Contacts</button><button onclick="alert('Reset from Termux Gateway console if needed')" class="bg-[var(--rose)] text-white py-2 rounded-xl text-[10px]">Reset Session</button><button onclick="saveSetupSettings('gateway_setting_save')" class="bg-[var(--green)] text-white py-2 rounded-xl text-[10px]">Save Gateway</button></div>`)+
+        setupSection('fa-wallet','Wallet / Payment Control',`${toggleRow('set-wallet-enabled','Wallet enabled',s.walletSettings.enabled!==false)}<input id="set-credit-limit" type="number" class="native-input mt-2" value="${s.walletSettings.defaultCreditLimit||0}">${toggleRow('set-positive-balance','Require positive balance',s.walletSettings.requirePositiveBalance)}${toggleRow('set-pay-auto','Payment automation',s.paymentSettings.automationEnabled)}${toggleRow('set-require-utr','Require UTR',s.paymentSettings.requireUtr)}${toggleRow('set-dup-utr','Duplicate UTR block',s.paymentSettings.duplicateUtrBlock)}${toggleRow('set-approve-credit','Approve credits wallet',s.paymentSettings.approveCreditsWallet)}<div class="grid grid-cols-2 gap-2 mt-2"><input id="set-min-amount" type="number" class="native-input" value="${s.paymentSettings.minAmount||0}"><input id="set-max-amount" type="number" class="native-input" value="${s.paymentSettings.maxAmount||0}"></div><button onclick="saveSetupSettings()" class="mt-2 w-full bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Save Wallet/Payment Settings</button>`)+
+        setupSection('fa-triangle-exclamation','Risk Control',`${toggleRow('set-risk-enabled','Risk limit enabled',s.riskSettings.riskLimitEnabled!==false)}<div class="grid grid-cols-2 gap-2 mt-2"><input id="set-market-limit" type="number" class="native-input" value="${s.riskSettings.marketDailyLimit||0}"><input id="set-digit-limit" type="number" class="native-input" value="${s.riskSettings.digitDailyLimit||0}"><input id="set-user-limit" type="number" class="native-input" value="${s.riskSettings.userDailyLimit||0}"><input id="set-warning-percent" type="number" class="native-input" value="${s.riskSettings.warningPercent||80}"></div>${toggleRow('set-auto-lock','Auto lock on limit',s.riskSettings.autoLockOnLimit)}<button onclick="saveSetupSettings('risk_setting_save')" class="mt-2 w-full bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Save Risk Settings</button>`)+
+        setupSection('fa-shield-halved','Guard Control',`${toggleRow('set-spam-guard','Spam guard enabled',s.guardSettings.enabled)}${toggleRow('set-link-guard','Link guard enabled',s.guardSettings.linkGuardEnabled)}${toggleRow('set-forward-guard','Forward guard enabled',s.guardSettings.forwardGuardEnabled)}${toggleRow('set-delete-msg','Delete message',s.guardSettings.deleteMessage)}${toggleRow('set-kick','Kick enabled',s.guardSettings.kickEnabled)}<input id="set-strike-limit" type="number" class="native-input mt-2" value="${s.guardSettings.strikeLimit||3}">${['alert','warning','kick'].map(k=>`<textarea id="set-${k}-msg" class="native-input mt-2" placeholder="${k} message">${setupEsc(s.guardSettings[k+'Message']||'')}</textarea>`).join('')}<button onclick="saveSetupSettings('guard_setting_save')" class="mt-2 w-full bg-[var(--green)] text-white py-3 rounded-xl text-[10px] font-black">Save Guard Settings</button>`)+
+        setupSection('fa-database','Backup / Restore',`<p class="text-[10px] text-[var(--text-muted)]">Last backup: ${s.backupSettings.lastBackupAt||'Never'}</p>${toggleRow('set-auto-backup','Auto backup',s.backupSettings.autoBackup)}${toggleRow('set-backup-danger','Backup before dangerous action',s.backupSettings.backupBeforeDangerousAction)}<div class="grid grid-cols-2 gap-2 mt-2"><button onclick="setupDownloadBackup()" class="bg-[var(--primary)] text-white py-3 rounded-xl text-[10px] font-black">Download Backup</button><button onclick="setupRestoreBackup()" class="bg-[var(--surface-light)] text-white py-3 rounded-xl text-[10px] font-black">Restore Backup</button></div>`)+
+        setupSection('fa-clock-rotate-left','Audit / Danger Zone',`<div class="space-y-2">${(appState.setupAudit||[]).slice(0,8).map(a=>`<div class="bg-[var(--surface-light)] rounded-xl p-2 text-[10px]"><b class="text-white">${setupEsc(a.action)}</b><p class="text-[var(--text-muted)]">${setupEsc(a.time||'')}</p></div>`).join('')||'<p class="text-[10px] text-[var(--text-muted)]">No setup audit events.</p>'}</div><div class="grid grid-cols-2 gap-2 mt-3"><button onclick="if(prompt('Type RESET')==='RESET'){appState.settings.setup=setupDefaults();saveSetupSettings();}" class="bg-[var(--rose)] text-white py-3 rounded-xl text-[10px] font-black">Reset Setup</button><button onclick="setupDownloadBackup()" class="bg-[var(--primary)] text-white py-3 rounded-xl text-[10px] font-black">Export JSON</button></div>`)+`</div>`; }
+
         function renderBottomNav() {
             let navHtml = '';
             const navItems = [
@@ -6594,7 +6740,7 @@ TOTAL: 300</pre>
             else if(mainNav === 'guard' && IS_MASTER) { container.innerHTML = renderGuardTab(); }
             else if(mainNav === 'backup' && IS_MASTER) { container.innerHTML = renderBackupAuditTab(); }
             else if(mainNav === 'health' && IS_MASTER) { container.innerHTML = renderHealthMonitorTab(); if(!appState.healthMonitor) refreshHealthMonitor(); }
-            else if(mainNav === 'settings' && IS_MASTER) { container.innerHTML = renderSettings(); }
+            else if(mainNav === 'settings' && IS_MASTER) { container.innerHTML = renderSetupTab(); }
             else if(mainNav === 'settings' && !IS_MASTER) { container.innerHTML = renderVipSettings(); }
             else if(mainNav === 'membership' && !IS_MASTER) { container.innerHTML = renderMembership(); setTimeout(() => { selectPlan(_selectedPlan); loadPayments(); }, 100); }
 
