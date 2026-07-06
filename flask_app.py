@@ -455,6 +455,101 @@ def _normalize_hhmm(value):
         return f"{h:02d}:{m:02d}"
     return ''
 
+
+
+def _normalize_market_name(value):
+    return ' '.join(str(value or '').strip().upper().replace('*', '').split())
+
+def _market_delete_aliases(market):
+    base = _normalize_market_name(market)
+    if base.endswith(' OPEN') or base.endswith(' CLOSE'):
+        base = base.rsplit(' ', 1)[0]
+    aliases = [base, f"{base} OPEN", f"{base} CLOSE"]
+    return [x for i, x in enumerate(aliases) if x and x not in aliases[:i]]
+
+def _deleted_markets(state_obj):
+    setup = state_obj.setdefault('settings', {}).setdefault('setup', {})
+    markets_cfg = state_obj.setdefault('settings', {}).setdefault('markets', {})
+    vals = []
+    for src in (setup.get('deletedMarkets'), markets_cfg.get('deletedMarkets'), state_obj.get('deletedMarkets')):
+        if isinstance(src, list): vals.extend(src)
+    return sorted(set(_normalize_market_name(x) for x in vals if _normalize_market_name(x)))
+
+def _is_deleted_market_name(name, deleted):
+    n = _normalize_market_name(name)
+    return bool(n) and n in set(deleted or [])
+
+def _filter_deleted_market_constants(state_obj, markets, base_markets, chart_links):
+    deleted = _deleted_markets(state_obj) if isinstance(state_obj, dict) else []
+    return (
+        [m for m in markets if not _is_deleted_market_name(m.get('n'), deleted)],
+        [m for m in base_markets if not _is_deleted_market_name(m.get('n'), deleted)],
+        [m for m in chart_links if not _is_deleted_market_name(m.get('n'), deleted)]
+    )
+
+def _prune_market_delete_state(state_obj, aliases):
+    alias_set = set(aliases or [])
+    counts = {'entries': 0, 'results': 0, 'settlements': 0, 'schedules': 0, 'targets': 0}
+    def is_m(v): return _normalize_market_name(v) in alias_set
+    for key in ('entries', 'pendingEntries', 'acceptedEntries'):
+        if isinstance(state_obj.get(key), list):
+            before = len(state_obj[key]); state_obj[key] = [e for e in state_obj[key] if not (isinstance(e, dict) and is_m(e.get('market')))]
+            counts['entries'] += before - len(state_obj[key])
+    for key in ('resultRecords', 'results', 'settlementRecords', 'marketReports'):
+        obj = state_obj.get(key)
+        if isinstance(obj, dict):
+            for date, day in list(obj.items()):
+                if isinstance(day, dict):
+                    for mk in list(day.keys()):
+                        if is_m(mk):
+                            day.pop(mk, None)
+                            counts['results' if 'result' in key.lower() or key == 'results' else 'settlements'] += 1
+        elif isinstance(obj, list):
+            before = len(obj); state_obj[key] = [r for r in obj if not (isinstance(r, dict) and is_m(r.get('market')))]
+            counts['results' if 'result' in key.lower() else 'settlements'] += before - len(state_obj[key])
+    for settings_key in ('marketSettings','marketTimes','marketSchedules','resultMarkets','resultTargets','scrapeResultUrls','scrapeUrls'):
+        val = state_obj.get(settings_key)
+        if isinstance(val, dict):
+            for mk in list(val.keys()):
+                if is_m(mk): val.pop(mk, None); counts['schedules'] += 1
+        elif isinstance(val, list):
+            before = len(val)
+            state_obj[settings_key] = [x for x in val if not (is_m(x.get('market') if isinstance(x, dict) else x) or is_m(x.get('name') if isinstance(x, dict) else ''))]
+            removed = before - len(state_obj[settings_key])
+            counts['targets' if 'target' in settings_key.lower() else 'schedules'] += removed
+    es = state_obj.get('entrySettings') or {}
+    if isinstance(es.get('marketCloseTimes'), dict):
+        for mk in list(es['marketCloseTimes'].keys()):
+            if is_m(mk): es['marketCloseTimes'].pop(mk, None); counts['schedules'] += 1
+    lf = state_obj.get('loadForwarder') or {}
+    if is_m(lf.get('selectedMarket')): lf['selectedMarket'] = ''
+    for key in ('loadForwarderOutbox','scheduledSendItems','scheduleItems'):
+        if isinstance(state_obj.get(key), list):
+            before = len(state_obj[key]); state_obj[key] = [x for x in state_obj[key] if not (isinstance(x, dict) and is_m(x.get('market')))]
+            counts['schedules'] += before - len(state_obj[key])
+    locks = state_obj.get('marketLocks')
+    if isinstance(locks, dict):
+        for k, v in list(locks.items()):
+            if is_m(k): locks.pop(k, None)
+            elif isinstance(v, dict):
+                for mk in list(v.keys()):
+                    if is_m(mk): v.pop(mk, None)
+    rec_maps = [('data', MARKETS), ('pannelData', MARKETS), ('jodiData', BASE_MARKETS)]
+    for profile in (state_obj.get('profiles') or {}).values():
+        for day in (profile.get('dayRecords') or {}).values() if isinstance(profile, dict) else []:
+            if not isinstance(day, dict): continue
+            for dict_key, market_arr in rec_maps:
+                records = day.get(dict_key)
+                if not isinstance(records, dict): continue
+                for idx, rec in list(records.items()):
+                    try: market_name = market_arr[int(idx)].get('n')
+                    except Exception: market_name = ''
+                    if is_m(market_name) and isinstance(rec, dict):
+                        for k in ('schTime','scheduleTime','schTargets','targets','scheduledAt','lastScheduleSent'):
+                            rec.pop(k, None)
+                        counts['schedules'] += 1
+    return counts
+
 def _default_entry_settings():
     return {
         "entryParserEnabled": True,
@@ -718,7 +813,10 @@ def index():
         if vip_id in state.get("profiles", {}):
             user_payments = [p for p in state.get("payments", []) if p.get("userId") == vip_id]
             isolated_state = { "activeId": vip_id, "broadcasts": state.get("broadcasts", []), "profiles": { vip_id: state["profiles"][vip_id] }, "paymentMethods": state.get("paymentMethods", {"upi":"","phone":"","qr":""}), "payments": user_payments, "resultRecords": state.get("resultRecords", {}), "resultTargets": [], "resultSettings": state.get("resultSettings", {"autoScrapeEnabled": True, "useForwardTargetsForResults": True}), "wallets": {vip_id: state.get("wallets", {}).get(vip_id, {})}, "walletSettings": state.get("walletSettings", _default_wallet_settings()), "entrySettings": state.get("entrySettings", _default_entry_settings()), "entries": [e for e in state.get("entries", []) if e.get("userId") == vip_id], "settlementRecords": state.get("settlementRecords", {}), "settlementSettings": state.get("settlementSettings", _default_settlement_settings()), "paymentSettings": state.get("paymentSettings", _default_payment_settings()), "loadForwarder": state.get("loadForwarder", _default_load_forwarder_settings()), "loadForwarderOutbox": [], "spamGuardSettings": state.get("spamGuardSettings", _default_spam_guard_settings()), "spamGuardEvents": [] }
-            return render_template_string(HTML_TEMPLATE, state=isolated_state, markets=MARKETS, baseMarkets=BASE_MARKETS, chartLinks=CHART_LINKS, is_master=False, manifest_url=manifest_url)
+            fm, fb, fc = _filter_deleted_market_constants(state, MARKETS, BASE_MARKETS, CHART_LINKS)
+            isolated_state["settings"] = state.get("settings", {})
+            isolated_state["deletedMarkets"] = state.get("deletedMarkets", [])
+            return render_template_string(HTML_TEMPLATE, state=isolated_state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=False, manifest_url=manifest_url)
         else:
             blocked_html = """
             <!DOCTYPE html>
@@ -738,7 +836,8 @@ def index():
             return blocked_html
     else:
         state["activeId"] = "admin1"
-        return render_template_string(HTML_TEMPLATE, state=state, markets=MARKETS, baseMarkets=BASE_MARKETS, chartLinks=CHART_LINKS, is_master=True, manifest_url=manifest_url)
+        fm, fb, fc = _filter_deleted_market_constants(state, MARKETS, BASE_MARKETS, CHART_LINKS)
+        return render_template_string(HTML_TEMPLATE, state=state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=True, manifest_url=manifest_url)
 
 @app.route('/save', methods=['POST'])
 def save():
@@ -1344,6 +1443,30 @@ def api_risk_settings():
     _add_audit(state, 'risk_settings', settings)
     save_to_firebase(state)
     return jsonify({'status': 'success', 'riskSettings': settings})
+
+
+@app.route('/api/setup/market/delete', methods=['POST'])
+def api_setup_market_delete():
+    data = request.json or {}
+    market = _normalize_market_name(data.get('marketName'))
+    if not market:
+        return jsonify({'status': 'error', 'message': 'marketName required'}), 400
+    if data.get('confirmHardDelete') is not True:
+        return jsonify({'status': 'error', 'message': 'confirmHardDelete true required'}), 400
+    state = migrate_and_get_state()
+    aliases = _market_delete_aliases(market)
+    setup = state.setdefault('settings', {}).setdefault('setup', {})
+    markets_cfg = state.setdefault('settings', {}).setdefault('markets', {})
+    deleted = sorted(set(_deleted_markets(state) + aliases))
+    setup['deletedMarkets'] = deleted
+    markets_cfg['deletedMarkets'] = deleted
+    state['deletedMarkets'] = deleted
+    counts = _prune_market_delete_state(state, aliases)
+    event = {'type': 'market_delete', 'market': aliases[0], 'removedAliases': aliases, 'removedCounts': counts, 'at': _now_iso_local()}
+    state.setdefault('auditEvents', []).append(event)
+    _add_audit(state, 'market_delete', event)
+    save_to_firebase(state)
+    return jsonify({'status':'success','deletedMarket':aliases[0],'removedAliases':aliases,'removedCounts':counts,'message':'Market permanently deleted from all app modules.'})
 
 @app.route('/api/market_unlock', methods=['POST'])
 def api_market_unlock():
@@ -3665,10 +3788,32 @@ TOTAL: 300</pre>
             if(!appState.loadForwarder.scheduleTime) appState.loadForwarder.scheduleTime = '18:00';
             if(!appState.loadForwarder.maxRowsPerType) appState.loadForwarder.maxRowsPerType = 80;
         }
+        function normalizeMarketName(v){ return String(v || '').trim().toUpperCase().replace(/\\s+/g, ' '); }
+        function deletedMarketsList(){
+            const a = appState.settings?.setup?.deletedMarkets || [];
+            const b = appState.settings?.markets?.deletedMarkets || [];
+            const c = appState.deletedMarkets || [];
+            return Array.from(new Set([].concat(a,b,c).map(normalizeMarketName).filter(Boolean)));
+        }
+        function isDeletedMarketName(v){ return deletedMarketsList().includes(normalizeMarketName(v)); }
+        function activeMarketsList(src){ return (src || []).filter(m => m && !isDeletedMarketName(m.n)); }
         function forwardMarketsList(){
-            const fromEntries = Array.from(new Set((appState.entries || []).map(e => String(e.market || '').trim().toUpperCase()).filter(Boolean)));
-            const fromStatic = (markets || []).map(m => m.n).concat((baseMarkets || []).map(m => m.n));
+            const fromEntries = Array.from(new Set((appState.entries || []).map(e => String(e.market || '').trim().toUpperCase()).filter(Boolean))).filter(m => !isDeletedMarketName(m));
+            const fromStatic = activeMarketsList(markets).map(m => m.n).concat(activeMarketsList(baseMarkets).map(m => m.n));
             return Array.from(new Set(fromStatic.concat(fromEntries).map(x => String(x || '').trim().toUpperCase()).filter(Boolean))).sort();
+        }
+        async function hardDeleteMarketFromSetup(){
+            const marketName = normalizeMarketName(document.getElementById('setup-delete-market')?.value || '');
+            if(!marketName){ showRealNotification('⚠️ Select Market', 'Delete ke liye market select karein.', 'danger'); return; }
+            const typed = prompt('This will permanently delete this market from all app data, entries, results, schedules and forwarding. Type DELETE to confirm.');
+            if(typed !== 'DELETE'){ showRealNotification('⚠️ Delete Cancelled', 'Confirmation mismatch. Market delete nahi hua.', 'danger'); return; }
+            try{
+                const res = await fetch('/api/setup/market/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({marketName, confirmHardDelete:true})});
+                const data = await res.json();
+                if(data.status !== 'success') throw new Error(data.message || 'Delete failed');
+                showRealNotification('🗑️ Market Deleted', data.message || (marketName + ' deleted.'), 'success');
+                setTimeout(() => window.location.reload(), 700);
+            }catch(e){ showRealNotification('❌ Delete Error', String(e.message || e), 'danger'); }
         }
         async function refreshLoadForwarderState(){
             ensureLoadForwarderStruct();
@@ -5066,7 +5211,8 @@ TOTAL: 300</pre>
 
             // ── ANK/PAN: one row per base market, OPEN + CLOSE toggle ──
             let mktsHtmlOpenClose = (title, colorClass, trackDict) => {
-                let isAllChecked = baseMarkets.every(bm => {
+                const bmList = activeMarketsList(baseMarkets);
+                let isAllChecked = bmList.every(bm => {
                     const ok = bm.n + ' OPEN'; const ck = bm.n + ' CLOSE';
                     return state.dayRecords[currentDate][trackDict][ok] !== false &&
                            state.dayRecords[currentDate][trackDict][ck] !== false;
@@ -5088,7 +5234,7 @@ TOTAL: 300</pre>
                         <span class="text-[8px] font-black text-[var(--amber)] uppercase tracking-wider">CLOSE</span>
                     </div>
                     <div class="space-y-1.5">
-                        ${baseMarkets.map(bm => {
+                        ${bmList.map(bm => {
                             const ok = bm.n + ' OPEN'; const ck = bm.n + ' CLOSE';
                             const openOn  = state.dayRecords[currentDate][trackDict][ok]  !== false;
                             const closeOn = state.dayRecords[currentDate][trackDict][ck] !== false;
@@ -5111,7 +5257,8 @@ TOTAL: 300</pre>
 
             // ── JODI: single toggle per base market ──
             let mktsHtmlJodi = () => {
-                let isAllChecked = baseMarkets.every(m => state.dayRecords[currentDate].visJodi[m.n] !== false);
+                const bmList = activeMarketsList(baseMarkets);
+                let isAllChecked = bmList.every(m => state.dayRecords[currentDate].visJodi[m.n] !== false);
                 return `
                 <div class="native-card p-4 mb-3">
                     <div class="flex justify-between items-center mb-3">
@@ -5125,7 +5272,7 @@ TOTAL: 300</pre>
                         </div>
                     </div>
                     <div class="grid grid-cols-2 gap-2">
-                        ${baseMarkets.map(m => `
+                        ${bmList.map(m => `
                             <div class="flex justify-between items-center bg-[var(--surface-light)] p-3 rounded-xl border border-[var(--border)]">
                                 <span class="text-[9px] font-bold text-[var(--text-muted)] uppercase truncate pr-2">${m.n}</span>
                                 <label class="switch transform scale-[0.6] origin-right m-0">
@@ -5159,6 +5306,16 @@ TOTAL: 300</pre>
 
             return `
                 <div class="px-3 py-4">
+
+                    <p class="sec-header">Setup Tab Market Control</p>
+                    <div class="native-card p-4 mb-3" style="border-color:rgba(255,59,48,0.35);background:rgba(255,59,48,0.05)">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="w-10 h-10 rounded-xl bg-[rgba(255,59,48,0.15)] text-[var(--rose)] flex items-center justify-center border border-[rgba(255,59,48,0.25)]"><i class="fas fa-trash-can"></i></div>
+                            <div><h3 class="text-white font-black text-[13px] uppercase">Permanent Market Delete</h3><p class="text-[9px] text-[var(--text-muted)]">Removes base market + OPEN/CLOSE from app data, Firebase settings, schedules and Gateway.</p></div>
+                        </div>
+                        <select id="setup-delete-market" class="native-input text-[12px] mb-3"><option value="">Select market to permanently delete</option>${activeMarketsList(baseMarkets).map(m=>`<option value="${m.n}">${m.n}</option>`).join('')}</select>
+                        <button onclick="hardDeleteMarketFromSetup()" class="w-full bg-[var(--rose)] text-white py-3 rounded-xl font-black text-[10px] uppercase active:scale-95"><i class="fas fa-triangle-exclamation mr-1"></i> Delete Market Permanently</button>
+                    </div>
                     <p class="sec-header">Capital & Day Targets</p>
                     <div class="native-card p-4 mb-3" style="border-color:rgba(0,194,111,0.25);background:rgba(0,194,111,0.04)">
                         <div class="grid grid-cols-2 gap-3 mb-3">

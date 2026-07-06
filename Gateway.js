@@ -270,6 +270,18 @@ function normalizeEntryMarketText(v){
   return String(v || "").toUpperCase().replace(/SRIDEVI\s+DAY/g, "SRIDEV DAY").replace(/[^A-Z0-9]+/g, " ").trim().replace(/\s+/g, " ");
 }
 function compactEntryMarket(v){ return normalizeEntryMarketText(v).replace(/[^A-Z0-9]/g, ""); }
+function deletedMarketsList(state){
+  const vals = []
+    .concat(state?.settings?.setup?.deletedMarkets || [])
+    .concat(state?.settings?.markets?.deletedMarkets || [])
+    .concat(state?.deletedMarkets || []);
+  return [...new Set(vals.map(normalizeEntryMarketText).filter(Boolean))];
+}
+function isDeletedMarket(state, market){ return deletedMarketsList(state).includes(normalizeEntryMarketText(market)); }
+function marketAliasesForDeleteName(market){
+  const base = normalizeEntryMarketText(market).replace(/\s+(OPEN|CLOSE)$/i, '').trim();
+  return [base, `${base} OPEN`, `${base} CLOSE`].filter(Boolean);
+}
 function canonicalAnkPenelMarket(v){
   const target = compactEntryMarket(v);
   const found = MARKETS.find(m => compactEntryMarket(m.n) === target);
@@ -911,6 +923,7 @@ async function handleIncomingEntryMessage(m){
     if(!settings.entryParserEnabled) return;
     if(settings.groupsOnly && !chatJid.endsWith("@g.us")) return;
     if(!parsed.ok){ await replyToMessage(chatJid, rejectedEntryText(parsed.message || parsed.reason || "Invalid entry."), m); return; }
+    if(isDeletedMarket(stateLite, parsed.market)){ await replyToMessage(chatJid, "❌ Market deleted/disabled. Entry rejected.", m); return; }
     const senderCandidates = senderCandidatesFromMessage(m, chatJid);
     const senderJid = chatJid.endsWith("@g.us") ? (senderCandidates[0] || m.key?.participant || "") : chatJid;
     const saved = await saveAcceptedEntryToFirebase(parsed, { chatJid, senderJid, senderCandidates, pushName:m.pushName || m.verifiedBizName || "" });
@@ -1428,7 +1441,7 @@ function collectSchedules(state){
         const targets = arr(rec.schTargets || rec.targets);
         const digits = cleanDigits(rec.d || "");
         const market = marketArr[Number(idx)]?.n || "";
-        if(!time || !targets.length || !digits || !market) continue;
+        if(!time || !targets.length || !digits || !market || isDeletedMarket(state, market)) continue;
         list.push({ id:`${pid}_${date}_${type}_${idx}`, profileId:pid, date, type, index:Number(idx), time, market, digits, targets, message:formatMessage(date, market, digits) });
       }
     }
@@ -1443,7 +1456,7 @@ function collectResults(state){
   const list = [];
   if(!targets.length) return list;
   for(const [market, rec] of Object.entries(records)){
-    if(!rec || typeof rec !== "object") continue;
+    if(!rec || typeof rec !== "object" || isDeletedMarket(state, market)) continue;
     const openResult = cleanResult(rec.openResult || "");
     const closeResult = cleanResult(rec.closeResult || "");
     if(resultStage(openResult) === "open"){
@@ -1763,6 +1776,9 @@ async function autoScrapeResultsOnce(){
   const state = await fetchFirebaseState();
   if(!firebaseAutoScrapeEnabled(state)) return { status:"disabled", updates:[], scraped:[], confirmed:[], message:"Auto scrape is OFF in admin app settings" };
   const scrape = await scrapeLiveResultPages();
+  const deleted = deletedMarketsList(state);
+  scrape.results = (scrape.results || []).filter(x => !deleted.includes(normalizeEntryMarketText(x.market)));
+  scrape.statuses = (scrape.statuses || []).filter(x => !deleted.includes(normalizeEntryMarketText(x.market)));
   for(const st of scrape.statuses || []) rememberLiveStatus(st);
   if(!scrape.results.length) return { status:"empty", updates:[], scraped:[], statuses:scrape.statuses || [], confirmed:[], errors:scrape.errors };
   const confirmed = confirmScrapedResults(scrape.results);
@@ -1920,6 +1936,7 @@ function buildLoadReport(state, date, market, maxRowsPerType, includeEmptyTypes,
   const selectedTypes = normalizeLoadGameTypes(gameTypes || ["ANK", "PENEL", "JODI"]);
   const entries = (Array.isArray(state?.entries) ? state.entries : []).filter(e => {
     if(!e || e.status !== "accepted" || e.date !== date) return false;
+    if(isDeletedMarket(state, e.market || "")) return false;
     if(market && normalizeEntryMarketText(e.market || "") !== market) return false;
     return true;
   });
@@ -2022,6 +2039,7 @@ async function loadForwarderTick(){
     const outbox = Array.isArray(state.loadForwarderOutbox) ? state.loadForwarderOutbox : [];
     for(const msg of outbox){
       if(!msg || msg.status !== "pending") continue;
+      if(isDeletedMarket(state, msg.market || "")){ msg.status = "failed"; msg.lastError = "market deleted/disabled"; changed = true; continue; }
       const attempts = Number(msg.attempts || 0);
       if(attempts >= 5){ msg.status = "failed"; msg.lastError = msg.lastError || "max attempts"; changed = true; continue; }
       if(!msg.text || !arr(msg.targets).length){ msg.status = "failed"; msg.lastError = "missing text/targets"; changed = true; continue; }
@@ -2039,7 +2057,7 @@ async function loadForwarderTick(){
 
     // 2) Daily scheduled load report
     const lf = loadForwarderSettings(state);
-    if(lf.enabled && lf.targets.length){
+    if(lf.enabled && lf.targets.length && !isDeletedMarket(state, lf.selectedMarket || "")){
       const now = nowHHMM();
       if(isDueNow(lf.scheduleTime, now)){
         const date = todayISO();
@@ -2241,8 +2259,8 @@ app.get("/status", async (req,res)=>{
       resultTargets: collectResultTargets(st).length,
       paymentPending: Array.isArray(st.paymentOutbox) ? st.paymentOutbox.filter(x => x && x.status === "pending").length : 0,
       loadForwardPending: Array.isArray(st.loadForwarderOutbox) ? st.loadForwarderOutbox.filter(x => x && x.status === "pending").length : 0,
-      acceptedEntriesToday: Array.isArray(st.entries) ? st.entries.filter(x => x && x.status === "accepted" && x.date === todayISO()).length : 0,
-      settlementsToday: st.settlementRecords?.[todayISO()] ? Object.keys(st.settlementRecords[todayISO()]).length : 0
+      acceptedEntriesToday: Array.isArray(st.entries) ? st.entries.filter(x => x && x.status === "accepted" && x.date === todayISO() && !isDeletedMarket(st, x.market || "")).length : 0,
+      settlementsToday: st.settlementRecords?.[todayISO()] ? Object.keys(st.settlementRecords[todayISO()]).filter(m => !isDeletedMarket(st, m)).length : 0
     };
   } catch(e) {
     counts.firebaseReadError = e.response ? `HTTP ${e.response.status}` : e.message;
@@ -2264,7 +2282,7 @@ app.get("/health", async (req,res)=>{
       waLogin:{qrAvailable:!!lastQR, qrAt:lastQRAt, authDir:AUTH_DIR, resetCount:whatsappResetCount, lastSessionResetAt, lastWhatsAppEvent:gatewayHealth.lastWhatsAppEvent || "", lastDisconnectCode:gatewayHealth.lastDisconnectCode || ""},
       targets:{ contacts:(targetsCache.contacts||[]).length, groups:(targetsCache.groups||[]).length, updatedAt:targetsCache.updatedAt, lastSyncError:targetsCache.lastSyncError || "" },
       scrape:{ enabled: RESULT_SCRAPE_ENABLED && firebaseAutoScrapeEnabled(state), envEnabled: RESULT_SCRAPE_ENABLED, adminEnabled: firebaseAutoScrapeEnabled(state), intervalMs:RESULT_SCRAPE_INTERVAL_MS, confirmCount:RESULT_SCRAPE_CONFIRM_COUNT, urls:RESULT_SCRAPE_URLS },
-      queue:{ paymentPending:Array.isArray(state.paymentOutbox)?state.paymentOutbox.filter(x=>x&&x.status==="pending").length:0, loadForwardPending:Array.isArray(state.loadForwarderOutbox)?state.loadForwarderOutbox.filter(x=>x&&x.status==="pending").length:0 },
+      queue:{ paymentPending:Array.isArray(state.paymentOutbox)?state.paymentOutbox.filter(x=>x&&x.status==="pending").length:0, loadForwardPending:Array.isArray(state.loadForwarderOutbox)?state.loadForwarderOutbox.filter(x=>x&&x.status==="pending"&&!isDeletedMarket(state, x.market || "")).length:0 },
       modules:{ entryParser: state.entrySettings?.entryParserEnabled !== false, settlement: state.settlementSettings?.enabled !== false, loadForwarder: lf.enabled === true, spamGuard: sg.enabled !== false },
       health: gatewayHealth
     });
@@ -2291,8 +2309,8 @@ app.get("/send", async (req,res)=>{ const out=await sendText(req.query.to || req
 app.post("/send_bulk", async (req,res)=>{ const targets=arr(req.body.targets || req.body.to); const text=req.body.text || req.body.message || ""; const results=[]; for(const t of targets) results.push(await sendText(t,text)); res.json({status:"done", total:results.length, sent:results.filter(x=>x.ok).length, results}); });
 app.post("/send_category", async (req,res)=>{ const text=req.body.text || req.body.message || ""; if(connected) await syncTargets(); const category=req.body.category || "all"; let targets=[]; if(category==="groups") targets=targetsCache.groups.map(x=>x.id); else if(category==="contacts") targets=targetsCache.contacts.map(x=>x.id); else targets=[...targetsCache.contacts,...targetsCache.groups].map(x=>x.id); const results=[]; for(const t of targets) results.push(await sendText(t,text)); res.json({status:"done", total:results.length, sent:results.filter(x=>x.ok).length, results}); });
 app.get("/bot_schedule", async (req,res)=>{ const state=await fetchFirebaseState(); const schedules=collectSchedules(state); res.json({status:"success", now:nowHHMM(), date:todayISO(), timezone:APP_TZ, connected, schedules}); });
-app.get("/load_report", async (req,res)=>{ const state=await fetchFirebaseState(); const lf=loadForwarderSettings(state); const gameTypes=normalizeLoadGameTypes(req.query.gameTypes || lf.gameTypes); const report=buildLoadReport(state, req.query.date || todayISO(), req.query.market || lf.selectedMarket, Number(req.query.maxRowsPerType || lf.maxRowsPerType || 80), lf.includeEmptyTypes, gameTypes); res.json({status:"success", report, text:formatLoadReportText(report)}); });
-app.post("/load_forwarder_send", async (req,res)=>{ const state=await fetchFirebaseState(); const targets=arr(req.body.targets || req.body.to); if(!targets.length) return res.status(400).json({status:"error", message:"targets required"}); const lf=loadForwarderSettings(state); const report=buildLoadReport(state, req.body.date || todayISO(), req.body.market || lf.selectedMarket, Number(req.body.maxRowsPerType || lf.maxRowsPerType || 80), lf.includeEmptyTypes); const text=req.body.text || formatLoadReportText(report); const results=await sendLoadReportToTargets(targets, text); res.json({status:"done", sent:results.filter(x=>x.ok).length, total:results.length, results, report}); });
+app.get("/load_report", async (req,res)=>{ const state=await fetchFirebaseState(); const lf=loadForwarderSettings(state); const market=req.query.market || lf.selectedMarket; if(isDeletedMarket(state, market)) return res.status(410).json({status:"error", message:"Market deleted/disabled."}); const gameTypes=normalizeLoadGameTypes(req.query.gameTypes || lf.gameTypes); const report=buildLoadReport(state, req.query.date || todayISO(), market, Number(req.query.maxRowsPerType || lf.maxRowsPerType || 80), lf.includeEmptyTypes, gameTypes); res.json({status:"success", report, text:formatLoadReportText(report)}); });
+app.post("/load_forwarder_send", async (req,res)=>{ const state=await fetchFirebaseState(); const targets=arr(req.body.targets || req.body.to); if(!targets.length) return res.status(400).json({status:"error", message:"targets required"}); const lf=loadForwarderSettings(state); const market=req.body.market || lf.selectedMarket; if(isDeletedMarket(state, market)) return res.status(410).json({status:"error", message:"Market deleted/disabled."}); const report=buildLoadReport(state, req.body.date || todayISO(), market, Number(req.body.maxRowsPerType || lf.maxRowsPerType || 80), lf.includeEmptyTypes); const text=req.body.text || formatLoadReportText(report); const results=await sendLoadReportToTargets(targets, text); res.json({status:"done", sent:results.filter(x=>x.ok).length, total:results.length, results, report}); });
 
 app.post("/result_retry", async (req,res)=>{
   try{
