@@ -278,6 +278,37 @@ function deletedMarketsList(state){
   return [...new Set(vals.map(normalizeEntryMarketText).filter(Boolean))];
 }
 function isDeletedMarket(state, market){ return deletedMarketsList(state).includes(normalizeEntryMarketText(market)); }
+
+function customMarketSources(state){
+  const vals=[];
+  const setup=state?.settings?.setup || {};
+  const markets=state?.settings?.markets || {};
+  for(const src of [setup.customMarkets, markets.customMarkets]){
+    if(Array.isArray(src)) vals.push(...src);
+    else if(src && typeof src === "object") vals.push(...Object.values(src));
+  }
+  return vals;
+}
+function marketAliases(base){
+  base = normalizeEntryMarketText(base).replace(/\s+(OPEN|CLOSE)$/i, '').trim();
+  return base ? [base, `${base} OPEN`, `${base} CLOSE`] : [];
+}
+function activeMarketRegistry(state){
+  const deleted = new Set(deletedMarketsList(state));
+  const base = new Map();
+  for(const b of BASE_MARKETS){
+    const name = normalizeEntryMarketText(b.n);
+    if(!deleted.has(name)) base.set(name, {market:name, aliases:marketAliases(name), enabled:true, scrapeEnabled:true, forwardEnabled:true, resultUrl:"", custom:false});
+  }
+  for(const raw of customMarketSources(state)){
+    if(!raw || typeof raw !== "object") continue;
+    const name = normalizeEntryMarketText(raw.market || raw.name || raw.n || raw.marketName);
+    if(!name || deleted.has(name) || raw.enabled === false) continue;
+    base.set(name, {market:name, aliases:Array.isArray(raw.aliases)&&raw.aliases.length ? raw.aliases.map(normalizeEntryMarketText) : marketAliases(name), openTime:String(raw.openTime||""), closeTime:String(raw.closeTime||""), resultUrl:String(raw.resultUrl||""), enabled:raw.enabled!==false, scrapeEnabled:raw.scrapeEnabled!==false, forwardEnabled:raw.forwardEnabled!==false, custom:true});
+  }
+  return [...base.values()];
+}
+
 function marketAliasesForDeleteName(market){
   const base = normalizeEntryMarketText(market).replace(/\s+(OPEN|CLOSE)$/i, '').trim();
   return [base, `${base} OPEN`, `${base} CLOSE`].filter(Boolean);
@@ -285,13 +316,21 @@ function marketAliasesForDeleteName(market){
 function canonicalAnkPenelMarket(v){
   const target = compactEntryMarket(v);
   const found = MARKETS.find(m => compactEntryMarket(m.n) === target);
-  return found ? found.n : "";
+  if(found) return found.n;
+  const st = global.__lastFirebaseState || {};
+  for(const r of activeMarketRegistry(st)){
+    for(const a of [r.market + ' OPEN', r.market + ' CLOSE', ...(r.aliases||[])]) if(compactEntryMarket(a) === target) return /CLOSE$/i.test(a) ? r.market + ' CLOSE' : (/OPEN$/i.test(a) ? r.market + ' OPEN' : r.market);
+  }
+  return "";
 }
 function canonicalJodiMarket(v){
   let raw = normalizeEntryMarketText(v).replace(/\s+(OPEN|CLOSE)$/i, "").trim();
   const target = compactEntryMarket(raw);
   const found = BASE_MARKETS.find(m => compactEntryMarket(m.n) === target);
-  return found ? found.n : "";
+  if(found) return found.n;
+  const st = global.__lastFirebaseState || {};
+  for(const r of activeMarketRegistry(st)) if(compactEntryMarket(r.market) === target || (r.aliases||[]).some(a => compactEntryMarket(String(a).replace(/\s+(OPEN|CLOSE)$/i,'')) === target)) return r.market;
+  return "";
 }
 function parseEntryCard(text){
   const raw = String(text || "").replace(/\r/g, "\n");
@@ -360,11 +399,16 @@ function riskSettings(state){
   };
 }
 function marketCloseTimes(state){
-  return {
+  const out = {
     ...DEFAULT_MARKET_CLOSE_TIMES,
     ...((state?.riskSettings?.marketCloseTimes && typeof state.riskSettings.marketCloseTimes === "object") ? state.riskSettings.marketCloseTimes : {}),
     ...((state?.entrySettings?.marketCloseTimes && typeof state.entrySettings.marketCloseTimes === "object") ? state.entrySettings.marketCloseTimes : {})
   };
+  for(const r of activeMarketRegistry(state)){
+    if(r.openTime) out[r.market + ' OPEN'] = r.openTime;
+    if(r.closeTime){ out[r.market + ' CLOSE'] = r.closeTime; out[r.market] = r.closeTime; }
+  }
+  return out;
 }
 function resolveMarketCloseTime(state, market){
   const times = marketCloseTimes(state);
@@ -1062,7 +1106,7 @@ function liveStateForMarket(market){
 function marketFromLineStart(line){
   const raw = decodeEntitiesBasic(line).toUpperCase().replace(/\s+/g, " ").trim();
   if(!raw) return null;
-  for(const row of RESULT_ALIAS_ROWS){
+  for(const row of (global.__resultAliasRows || RESULT_ALIAS_ROWS)){
     const re = new RegExp("^" + escapeRegex(row.alias).replace(/\\\s\+/g, "\\s+") + "(?:\\s+|$)");
     const m = raw.match(re);
     if(!m) continue;
@@ -1079,7 +1123,7 @@ function marketFromLineStart(line){
 function marketFromLineAnywhere(line){
   const raw = decodeEntitiesBasic(line).toUpperCase().replace(/\s+/g, " ").trim();
   if(!raw) return null;
-  for(const row of RESULT_ALIAS_ROWS){
+  for(const row of (global.__resultAliasRows || RESULT_ALIAS_ROWS)){
     const aliasPattern = escapeRegex(row.alias).replace(/\s+/g, "\\s+");
     const re = new RegExp("(?:^|\\s)" + aliasPattern + "(?:\\s+|$)(.*)$");
     const m = raw.match(re);
@@ -1187,7 +1231,16 @@ function extractResultsFromHtml(html, sourceUrl){
   }
   return { results:[...found.values()], statuses };
 }
-async function scrapeLiveResultPages(){
+function resultAliasRowsForState(state){
+  const rows = RESULT_ALIAS_ROWS.slice();
+  for(const r of activeMarketRegistry(state)){
+    if(r.scrapeEnabled === false) continue;
+    for(const a of new Set([r.market, ...(r.aliases||[])])){ rows.push({market:r.market, alias:String(a).toUpperCase().replace(/\s+/g,' ').trim()}); }
+  }
+  rows.sort((a,b)=>b.alias.length-a.alias.length);
+  return rows;
+}
+async function scrapeLiveResultPages(state){
   const byMarketStage = new Map();
   const statuses = [];
   const errors = [];
@@ -1199,7 +1252,9 @@ async function scrapeLiveResultPages(){
     "Pragma":"no-cache",
     "Expires":"0"
   };
-  for(const url of RESULT_SCRAPE_URLS){
+  const scrapeUrls = [...RESULT_SCRAPE_URLS, ...activeMarketRegistry(state).filter(r => r.scrapeEnabled !== false && r.resultUrl).map(r => r.resultUrl)];
+  const oldRows = global.__resultAliasRows; global.__resultAliasRows = resultAliasRowsForState(state);
+  for(const url of [...new Set(scrapeUrls)]){
     try {
       const fetchUrl = url + (url.includes("?") ? "&" : "?") + "_=" + Date.now();
       const res = await axios.get(fetchUrl, { timeout:8000, headers });
@@ -1214,6 +1269,7 @@ async function scrapeLiveResultPages(){
       errors.push(`${url}: ${e.response ? "HTTP "+e.response.status : e.message}`);
     }
   }
+  global.__resultAliasRows = oldRows;
   return { results:[...byMarketStage.values()], statuses, errors };
 }
 function confirmScrapedResults(scraped){
@@ -1695,7 +1751,9 @@ function firebaseDataUrl(){
 }
 async function fetchFirebaseState(){
   const res = await axios.get(firebaseDataUrl(), { timeout: 15000 });
-  return res.data || {};
+  const state = res.data || {};
+  global.__lastFirebaseState = state;
+  return state;
 }
 async function saveFirebaseState(state){
   const res = await axios.put(firebaseDataUrl(), state || {}, { timeout: 15000 });
@@ -1775,7 +1833,7 @@ async function autoScrapeResultsOnce(){
   if(!RESULT_SCRAPE_ENABLED) return { status:"disabled_env", updates:[], scraped:[], confirmed:[], message:"RESULT_SCRAPE_ENABLED=0" };
   const state = await fetchFirebaseState();
   if(!firebaseAutoScrapeEnabled(state)) return { status:"disabled", updates:[], scraped:[], confirmed:[], message:"Auto scrape is OFF in admin app settings" };
-  const scrape = await scrapeLiveResultPages();
+  const scrape = await scrapeLiveResultPages(state);
   const deleted = deletedMarketsList(state);
   scrape.results = (scrape.results || []).filter(x => !deleted.includes(normalizeEntryMarketText(x.market)));
   scrape.statuses = (scrape.statuses || []).filter(x => !deleted.includes(normalizeEntryMarketText(x.market)));
@@ -2253,9 +2311,13 @@ app.get("/status", async (req,res)=>{
   let adminEnabled = true;
   let counts = {};
   try {
-    const st = await fetchFirebaseState();
+    const st = await fetchFirebaseState(); global.__lastFirebaseState = st;
     adminEnabled = firebaseAutoScrapeEnabled(st);
+    const reg = activeMarketRegistry(st);
     counts = {
+      activeMarkets: reg.length,
+      customMarkets: reg.filter(x => x.custom).length,
+      scrapeMarkets: reg.filter(x => x.scrapeEnabled !== false && x.resultUrl).map(x => x.market),
       resultTargets: collectResultTargets(st).length,
       paymentPending: Array.isArray(st.paymentOutbox) ? st.paymentOutbox.filter(x => x && x.status === "pending").length : 0,
       loadForwardPending: Array.isArray(st.loadForwarderOutbox) ? st.loadForwarderOutbox.filter(x => x && x.status === "pending").length : 0,
@@ -2274,14 +2336,16 @@ app.get("/status", async (req,res)=>{
 });
 app.get("/health", async (req,res)=>{
   try {
-    const state = await fetchFirebaseState();
+    const state = await fetchFirebaseState(); global.__lastFirebaseState = state;
     const lf = state.loadForwarder || {};
     const sg = state.spamGuardSettings || {};
+    const reg = activeMarketRegistry(state);
     res.json({
       status:"success", connected, user:sock?.user || null, timezone:APP_TZ, now:nowHHMM(), date:todayISO(),
       waLogin:{qrAvailable:!!lastQR, qrAt:lastQRAt, authDir:AUTH_DIR, resetCount:whatsappResetCount, lastSessionResetAt, lastWhatsAppEvent:gatewayHealth.lastWhatsAppEvent || "", lastDisconnectCode:gatewayHealth.lastDisconnectCode || ""},
       targets:{ contacts:(targetsCache.contacts||[]).length, groups:(targetsCache.groups||[]).length, updatedAt:targetsCache.updatedAt, lastSyncError:targetsCache.lastSyncError || "" },
-      scrape:{ enabled: RESULT_SCRAPE_ENABLED && firebaseAutoScrapeEnabled(state), envEnabled: RESULT_SCRAPE_ENABLED, adminEnabled: firebaseAutoScrapeEnabled(state), intervalMs:RESULT_SCRAPE_INTERVAL_MS, confirmCount:RESULT_SCRAPE_CONFIRM_COUNT, urls:RESULT_SCRAPE_URLS },
+      scrape:{ enabled: RESULT_SCRAPE_ENABLED && firebaseAutoScrapeEnabled(state), envEnabled: RESULT_SCRAPE_ENABLED, adminEnabled: firebaseAutoScrapeEnabled(state), intervalMs:RESULT_SCRAPE_INTERVAL_MS, confirmCount:RESULT_SCRAPE_CONFIRM_COUNT, urls:RESULT_SCRAPE_URLS, customUrls:reg.filter(x => x.scrapeEnabled !== false && x.resultUrl).map(x => x.resultUrl) },
+      markets:{ active:reg.map(x => x.market), custom:reg.filter(x => x.custom).map(x => x.market) },
       queue:{ paymentPending:Array.isArray(state.paymentOutbox)?state.paymentOutbox.filter(x=>x&&x.status==="pending").length:0, loadForwardPending:Array.isArray(state.loadForwarderOutbox)?state.loadForwarderOutbox.filter(x=>x&&x.status==="pending"&&!isDeletedMarket(state, x.market || "")).length:0 },
       modules:{ entryParser: state.entrySettings?.entryParserEnabled !== false, settlement: state.settlementSettings?.enabled !== false, loadForwarder: lf.enabled === true, spamGuard: sg.enabled !== false },
       health: gatewayHealth
