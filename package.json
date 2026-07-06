@@ -1,1 +1,1 @@
-{"name":"titan-nova-gateway","version":"1.0.1","description":"Titan Nova compact runner","main":"Gateway.js","scripts":{"web":"python setup_control_center.py","bot":"node Gateway.js","start":"node Gateway.js"},"dependencies":{"cors":"^2.8.5","express":"^4.18.3"}}
+{"name":"titan-nova-gateway","version":"1.0.2","description":"Titan Nova strict two-file runner","main":"Gateway.js","scripts":{"web":"python flask_app.py","bot":"node Gateway.js","start":"node Gateway.js"},"dependencies":{"cors":"^2.8.5","express":"^4.18.3"}}
