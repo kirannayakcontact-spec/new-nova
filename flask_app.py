@@ -2053,6 +2053,8 @@ def api_health_monitor():
         }
     }
 
+    two_system_control = flow_status
+
     summary = {
         'firebase': {'status': 'success', 'url': get_firebase_url(), 'lastCheckedAt': _now_iso_local()},
         'gateway': gateway,
