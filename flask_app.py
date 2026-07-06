@@ -2048,7 +2048,8 @@ def api_health_monitor():
         'professional': {
             'flowStatus': flow_status,
             'actionPlan': action_plan,
-            'riskSummary': risk_summary
+            'riskSummary': risk_summary,
+            'systems': two_system_control
         },
         'last': {
             'backupAt': (state.get('backupSettings') or {}).get('lastBackupAt', ''),
