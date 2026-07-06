@@ -2088,6 +2088,7 @@ def api_health_monitor():
             'actionPlan': action_plan,
             'riskSummary': risk_summary,
             'systems': two_system_control
+            'riskSummary': risk_summary
         },
         'last': {
             'backupAt': (state.get('backupSettings') or {}).get('lastBackupAt', ''),
@@ -3561,6 +3562,23 @@ TOTAL: 300</pre>
                             </div>
                         </details>
                         ${(riskSummary.lowWallets || []).length ? `<details class="mt-3 bg-[#17212B] rounded-xl border border-[var(--border)] overflow-hidden"><summary class="px-3 py-3 text-white font-black text-[10px] uppercase cursor-pointer">Bookie Low Wallet Watchlist (${riskSummary.lowWallets.length})</summary><div class="px-3 pb-3 space-y-1">${riskSummary.lowWallets.map(w => `<div class="flex justify-between gap-2 text-[10px] py-1 border-b border-[var(--border)] last:border-0"><span class="text-[var(--text-muted)] truncate">${htmlEscape(w.name || w.userId)}</span><b class="text-[var(--rose)] shrink-0">${healthMoney(w.available || 0)}</b></div>`).join('')}</div></details>` : ''}
+                                <p class="text-white font-black text-[13px] uppercase"><i class="fas fa-diagram-project text-[var(--green)] mr-1"></i> Professional Flow Board</p>
+                                <p class="text-[var(--text-muted)] text-[10px] mt-1">Entry → Wallet/Risk → Load → Result → Settlement → Delivery → Backup</p>
+                            </div>
+                            ${healthStatusPill((actionPlan[0] || {}).level === 'success', 'READY', 'ACTION')}
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 mb-3">
+                            ${flowStatus.map(item => `<button onclick="setMainNavFromHealth('${item.key === 'entry' ? 'entries' : item.key === 'delivery' ? 'results' : item.key === 'risk' ? 'entries' : item.key}')" class="text-left bg-[var(--surface-light)] border border-[var(--border)] rounded-xl p-3 active:scale-95">
+                                <div class="flex items-center justify-between gap-2"><p class="text-white font-black text-[10px] uppercase">${item.title}</p>${healthStatusPill(item.ok, 'OK', 'OFF')}</div>
+                                <p class="text-[var(--text-muted)] text-[9px] mt-1 leading-snug">${htmlEscape(item.detail || '-')}</p>
+                            </button>`).join('')}
+                        </div>
+                        <div class="space-y-2">
+                            ${(actionPlan || []).map(a => `<button onclick="setMainNavFromHealth('${a.target || 'health'}')" class="w-full flex items-start justify-between gap-3 text-left bg-[#17212B] border border-[var(--border)] rounded-xl p-3 active:scale-95">
+                                <div><p class="text-white font-black text-[10px] uppercase">${htmlEscape(a.title || 'Action')}</p><p class="text-[var(--text-muted)] text-[9px] mt-1 leading-snug">${htmlEscape(a.detail || '')}</p></div>${proLevelPill(a.level || 'info')}
+                            </button>`).join('')}
+                        </div>
+                        ${(riskSummary.lowWallets || []).length ? `<details class="mt-3 bg-[#17212B] rounded-xl border border-[var(--border)] overflow-hidden"><summary class="px-3 py-3 text-white font-black text-[10px] uppercase cursor-pointer">Low Wallet Watchlist (${riskSummary.lowWallets.length})</summary><div class="px-3 pb-3 space-y-1">${riskSummary.lowWallets.map(w => `<div class="flex justify-between gap-2 text-[10px] py-1 border-b border-[var(--border)] last:border-0"><span class="text-[var(--text-muted)] truncate">${htmlEscape(w.name || w.userId)}</span><b class="text-[var(--rose)] shrink-0">${healthMoney(w.available || 0)}</b></div>`).join('')}</div></details>` : ''}
                     </div>
                     <div class="native-card p-4 mb-3 border border-[rgba(42,171,238,0.18)]">
                         <div class="flex items-center justify-between gap-3 mb-3">
