@@ -487,6 +487,80 @@ def _filter_deleted_market_constants(state_obj, markets, base_markets, chart_lin
         [m for m in chart_links if not _is_deleted_market_name(m.get('n'), deleted)]
     )
 
+
+def _custom_market_sources(state_obj):
+    settings = state_obj.setdefault('settings', {})
+    setup = settings.setdefault('setup', {})
+    markets_cfg = settings.setdefault('markets', {})
+    vals = []
+    for src in (setup.get('customMarkets'), markets_cfg.get('customMarkets')):
+        if isinstance(src, dict): vals.extend(src.values())
+        elif isinstance(src, list): vals.extend(src)
+    return vals
+
+def _market_aliases(base):
+    base = _normalize_market_name(base)
+    return [base, f"{base} OPEN", f"{base} CLOSE"] if base else []
+
+def _custom_market_record(data, existing=None):
+    base = _normalize_market_name((data or {}).get('marketName') or (data or {}).get('market') or (existing or {}).get('market') or (existing or {}).get('name'))
+    aliases = _market_aliases(base)
+    open_time = _normalize_hhmm((data or {}).get('openTime') or (existing or {}).get('openTime'))
+    close_time = _normalize_hhmm((data or {}).get('closeTime') or (existing or {}).get('closeTime'))
+    result_url = str((data or {}).get('resultUrl') if (data or {}).get('resultUrl') is not None else (existing or {}).get('resultUrl') or '').strip()
+    rec = {
+        'market': base, 'name': base, 'n': base, 'aliases': aliases,
+        'openTime': open_time, 'closeTime': close_time, 'resultUrl': result_url,
+        'enabled': bool((data or {}).get('enabled', (existing or {}).get('enabled', True))),
+        'scrapeEnabled': bool((data or {}).get('scrapeEnabled', (existing or {}).get('scrapeEnabled', True))),
+        'forwardEnabled': bool((data or {}).get('forwardEnabled', (existing or {}).get('forwardEnabled', True))),
+        'updatedAt': _now_iso_local()
+    }
+    return rec
+
+def _write_custom_market(state_obj, rec):
+    settings = state_obj.setdefault('settings', {})
+    setup = settings.setdefault('setup', {})
+    markets_cfg = settings.setdefault('markets', {})
+    setup.setdefault('customMarkets', {})[rec['market']] = rec
+    markets_cfg.setdefault('customMarkets', {})[rec['market']] = rec
+    aliases = set(rec.get('aliases') or _market_aliases(rec.get('market')))
+    for container in (setup, markets_cfg, state_obj):
+        if isinstance(container.get('deletedMarkets'), list):
+            container['deletedMarkets'] = [x for x in container.get('deletedMarkets', []) if _normalize_market_name(x) not in aliases]
+    es = state_obj.setdefault('entrySettings', _default_entry_settings())
+    times = es.setdefault('marketCloseTimes', {})
+    if rec.get('openTime'): times[f"{rec['market']} OPEN"] = rec['openTime']
+    if rec.get('closeTime'):
+        times[f"{rec['market']} CLOSE"] = rec['closeTime']
+        times[rec['market']] = rec['closeTime']
+
+def get_active_market_registry(state_obj):
+    deleted = set(_deleted_markets(state_obj))
+    by_base = {}
+    for b in BASE_MARKETS:
+        base = _normalize_market_name(b.get('n'))
+        if base in deleted: continue
+        open_m = next((m for m in MARKETS if m['n'] == base + ' OPEN'), None)
+        close_m = next((m for m in MARKETS if m['n'] == base + ' CLOSE'), None)
+        by_base[base] = {'market':base,'name':base,'n':base,'aliases':_market_aliases(base),'openTime': f"{int(open_m['hr']):02d}:{int(open_m['min']):02d}" if open_m else '', 'closeTime': f"{int(close_m['hr']):02d}:{int(close_m['min']):02d}" if close_m else '', 'resultUrl':'', 'enabled':True, 'scrapeEnabled':True, 'forwardEnabled':True, 'custom':False}
+    for raw in _custom_market_sources(state_obj):
+        if not isinstance(raw, dict): continue
+        rec = _custom_market_record(raw, raw)
+        base = rec.get('market')
+        if not base or base in deleted or rec.get('enabled') is False: continue
+        by_base[base] = {**rec, 'custom': True}
+    base_markets = [{'n': r['market'], **r} for r in by_base.values()]
+    markets = []
+    chart_links = []
+    for r in base_markets:
+        if r.get('openTime'):
+            h,m = map(int, r['openTime'].split(':')); markets.append({'n': r['market'] + ' OPEN', 'hr':h, 'min':m, 'base':r['market'], 'enabled':r.get('enabled', True), 'scrapeEnabled':r.get('scrapeEnabled', True), 'forwardEnabled':r.get('forwardEnabled', True), 'resultUrl':r.get('resultUrl','')})
+        if r.get('closeTime'):
+            h,m = map(int, r['closeTime'].split(':')); markets.append({'n': r['market'] + ' CLOSE', 'hr':h, 'min':m, 'base':r['market'], 'enabled':r.get('enabled', True), 'scrapeEnabled':r.get('scrapeEnabled', True), 'forwardEnabled':r.get('forwardEnabled', True), 'resultUrl':r.get('resultUrl','')})
+        if r.get('resultUrl'): chart_links.append({'n': r['market'], 'l': r.get('resultUrl')})
+    return {'baseMarkets': base_markets, 'markets': markets, 'chartLinks': chart_links, 'customMarkets': [r for r in base_markets if r.get('custom')]}
+
 def _prune_market_delete_state(state_obj, aliases):
     alias_set = set(aliases or [])
     counts = {'entries': 0, 'results': 0, 'settlements': 0, 'schedules': 0, 'targets': 0}
@@ -813,7 +887,8 @@ def index():
         if vip_id in state.get("profiles", {}):
             user_payments = [p for p in state.get("payments", []) if p.get("userId") == vip_id]
             isolated_state = { "activeId": vip_id, "broadcasts": state.get("broadcasts", []), "profiles": { vip_id: state["profiles"][vip_id] }, "paymentMethods": state.get("paymentMethods", {"upi":"","phone":"","qr":""}), "payments": user_payments, "resultRecords": state.get("resultRecords", {}), "resultTargets": [], "resultSettings": state.get("resultSettings", {"autoScrapeEnabled": True, "useForwardTargetsForResults": True}), "wallets": {vip_id: state.get("wallets", {}).get(vip_id, {})}, "walletSettings": state.get("walletSettings", _default_wallet_settings()), "entrySettings": state.get("entrySettings", _default_entry_settings()), "entries": [e for e in state.get("entries", []) if e.get("userId") == vip_id], "settlementRecords": state.get("settlementRecords", {}), "settlementSettings": state.get("settlementSettings", _default_settlement_settings()), "paymentSettings": state.get("paymentSettings", _default_payment_settings()), "loadForwarder": state.get("loadForwarder", _default_load_forwarder_settings()), "loadForwarderOutbox": [], "spamGuardSettings": state.get("spamGuardSettings", _default_spam_guard_settings()), "spamGuardEvents": [] }
-            fm, fb, fc = _filter_deleted_market_constants(state, MARKETS, BASE_MARKETS, CHART_LINKS)
+            reg = get_active_market_registry(state)
+            fm, fb, fc = reg['markets'], reg['baseMarkets'], reg['chartLinks']
             isolated_state["settings"] = state.get("settings", {})
             isolated_state["deletedMarkets"] = state.get("deletedMarkets", [])
             return render_template_string(HTML_TEMPLATE, state=isolated_state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=False, manifest_url=manifest_url)
@@ -836,7 +911,8 @@ def index():
             return blocked_html
     else:
         state["activeId"] = "admin1"
-        fm, fb, fc = _filter_deleted_market_constants(state, MARKETS, BASE_MARKETS, CHART_LINKS)
+        reg = get_active_market_registry(state)
+        fm, fb, fc = reg['markets'], reg['baseMarkets'], reg['chartLinks']
         return render_template_string(HTML_TEMPLATE, state=state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=True, manifest_url=manifest_url)
 
 @app.route('/save', methods=['POST'])
@@ -1179,7 +1255,14 @@ def _detect_result_stage(v):
     return '', val
 
 def _valid_base_market_name(market):
-    market = str(market or '').strip().upper()
+    market = _normalize_market_name(market)
+    try:
+        reg = get_active_market_registry(migrate_and_get_state())
+        for m in reg.get('baseMarkets', []):
+            if _normalize_market_name(m.get('n')) == market:
+                return m.get('n')
+    except Exception:
+        pass
     for m in BASE_MARKETS:
         if m['n'].upper() == market:
             return m['n']
@@ -1444,6 +1527,61 @@ def api_risk_settings():
     save_to_firebase(state)
     return jsonify({'status': 'success', 'riskSettings': settings})
 
+
+
+@app.route('/api/setup/market/add', methods=['POST'])
+def api_setup_market_add():
+    data = request.json or {}
+    base = _normalize_market_name(data.get('marketName'))
+    if not base:
+        return jsonify({'status':'error','message':'marketName required'}), 400
+    open_time = _normalize_hhmm(data.get('openTime'))
+    close_time = _normalize_hhmm(data.get('closeTime'))
+    if not open_time or not close_time:
+        return jsonify({'status':'error','message':'Valid openTime and closeTime required (HH:MM).'}), 400
+    state = migrate_and_get_state()
+    deleted_before = base in set(_deleted_markets(state))
+    default_names = set(_normalize_market_name(x.get('n')) for x in BASE_MARKETS)
+    custom_names = set()
+    for raw in _custom_market_sources(state):
+        if isinstance(raw, dict):
+            custom_names.add(_normalize_market_name(raw.get('market') or raw.get('name') or raw.get('n') or raw.get('marketName')))
+    if base in default_names and not deleted_before:
+        return jsonify({'status':'error','message':'Market already exists.'}), 409
+    if base in custom_names and not deleted_before:
+        return jsonify({'status':'error','message':'Market already exists.'}), 409
+    rec = _custom_market_record({**data, 'marketName': base, 'openTime': open_time, 'closeTime': close_time})
+    rec['createdAt'] = rec.get('createdAt') or _now_iso_local()
+    _write_custom_market(state, rec)
+    event = {'type':'market_add','market':base,'aliases':rec['aliases'],'openTime':open_time,'closeTime':close_time,'resultUrl':rec.get('resultUrl',''),'at':_now_iso_local()}
+    state.setdefault('auditEvents', []).append(event)
+    _add_audit(state, 'market_add', event)
+    save_to_firebase(state)
+    return jsonify({'status':'success','market':base,'aliases':rec['aliases'],'openTime':open_time,'closeTime':close_time,'resultUrl':rec.get('resultUrl',''),'message':'Market restored and added successfully.' if deleted_before else 'Market added permanently across all app modules.'})
+
+@app.route('/api/setup/market/save', methods=['POST'])
+def api_setup_market_save():
+    data = request.json or {}
+    base = _normalize_market_name(data.get('marketName') or data.get('market'))
+    if not base:
+        return jsonify({'status':'error','message':'marketName required'}), 400
+    state = migrate_and_get_state()
+    existing = None
+    for raw in _custom_market_sources(state):
+        if isinstance(raw, dict) and _normalize_market_name(raw.get('market') or raw.get('name') or raw.get('n')) == base:
+            existing = raw
+            break
+    if not existing and base not in set(_normalize_market_name(x.get('n')) for x in BASE_MARKETS):
+        existing = {'market': base, 'enabled': True, 'scrapeEnabled': True, 'forwardEnabled': True}
+    if not existing:
+        return jsonify({'status':'error','message':'Only custom markets can be edited here.'}), 400
+    rec = _custom_market_record({**data, 'marketName': base}, existing)
+    if not rec.get('openTime') or not rec.get('closeTime'):
+        return jsonify({'status':'error','message':'Valid openTime and closeTime required (HH:MM).'}), 400
+    _write_custom_market(state, rec)
+    _add_audit(state, 'market_save', {'market':base,'openTime':rec['openTime'],'closeTime':rec['closeTime'],'resultUrl':rec.get('resultUrl',''),'enabled':rec.get('enabled'),'scrapeEnabled':rec.get('scrapeEnabled'),'forwardEnabled':rec.get('forwardEnabled')})
+    save_to_firebase(state)
+    return jsonify({'status':'success','market':base,'record':rec,'message':'Market saved successfully.'})
 
 @app.route('/api/setup/market/delete', methods=['POST'])
 def api_setup_market_delete():
@@ -3802,6 +3940,31 @@ TOTAL: 300</pre>
             const fromStatic = activeMarketsList(markets).map(m => m.n).concat(activeMarketsList(baseMarkets).map(m => m.n));
             return Array.from(new Set(fromStatic.concat(fromEntries).map(x => String(x || '').trim().toUpperCase()).filter(Boolean))).sort();
         }
+
+        function setupMarketFormPayload(){
+            return {
+                marketName: normalizeMarketName(document.getElementById('setup-add-market-name')?.value || ''),
+                openTime: document.getElementById('setup-add-open-time')?.value || '',
+                closeTime: document.getElementById('setup-add-close-time')?.value || '',
+                resultUrl: (document.getElementById('setup-add-result-url')?.value || '').trim(),
+                enabled: !!document.getElementById('setup-add-enabled')?.checked,
+                scrapeEnabled: !!document.getElementById('setup-add-scrape')?.checked,
+                forwardEnabled: !!document.getElementById('setup-add-forward')?.checked
+            };
+        }
+        async function addSetupMarket(){
+            const payload = setupMarketFormPayload();
+            if(!payload.marketName) return showRealNotification('⚠️ Market Name', 'Market name required.', 'danger');
+            if(!payload.openTime || !payload.closeTime) return showRealNotification('⚠️ Market Time', 'Open aur close time required hai.', 'danger');
+            try{
+                const res = await fetch('/api/setup/market/add', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+                const data = await res.json();
+                if(data.status !== 'success') throw new Error(data.message || 'Market add failed');
+                showRealNotification('✅ Market Added', data.message || (data.market + ' added.'), 'success');
+                setTimeout(() => window.location.reload(), 700);
+            }catch(e){ showRealNotification('❌ Add Market Error', String(e.message || e), 'danger'); }
+        }
+
         async function hardDeleteMarketFromSetup(){
             const marketName = normalizeMarketName(document.getElementById('setup-delete-market')?.value || '');
             if(!marketName){ showRealNotification('⚠️ Select Market', 'Delete ke liye market select karein.', 'danger'); return; }
@@ -5308,6 +5471,25 @@ TOTAL: 300</pre>
                 <div class="px-3 py-4">
 
                     <p class="sec-header">Setup Tab Market Control</p>
+
+                    <div class="native-card p-4 mb-3" style="border-color:rgba(0,194,111,0.28);background:rgba(0,194,111,0.04)">
+                        <div class="flex items-center gap-3 mb-3">
+                            <div class="w-10 h-10 rounded-xl bg-[rgba(0,194,111,0.15)] text-[var(--green)] flex items-center justify-center border border-[rgba(0,194,111,0.25)]"><i class="fas fa-plus"></i></div>
+                            <div><h3 class="text-white font-black text-[13px] uppercase">Add New Market</h3><p class="text-[9px] text-[var(--text-muted)]">Permanent Firebase market registry: Ledger, Entries, Results, Forward and Gateway.</p></div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 mb-2">
+                            <div class="col-span-2"><p class="stat-lbl">Market Name</p><input id="setup-add-market-name" class="native-input text-[12px]" placeholder="TEST BAZAR"></div>
+                            <div><p class="stat-lbl">Open Time</p><input id="setup-add-open-time" type="time" class="native-input text-[12px]"></div>
+                            <div><p class="stat-lbl">Close Time</p><input id="setup-add-close-time" type="time" class="native-input text-[12px]"></div>
+                            <div class="col-span-2"><p class="stat-lbl">Result URL</p><input id="setup-add-result-url" class="native-input text-[12px]" placeholder="https://dpbosse.net/jodi/TESTBAZAR/999"></div>
+                        </div>
+                        <div class="grid grid-cols-3 gap-2 mb-3">
+                            <label class="bg-[var(--surface-light)] border border-[var(--border)] rounded-xl p-2 text-[9px] font-black text-white flex items-center justify-center gap-2"><input id="setup-add-enabled" type="checkbox" checked> Enabled</label>
+                            <label class="bg-[var(--surface-light)] border border-[var(--border)] rounded-xl p-2 text-[9px] font-black text-white flex items-center justify-center gap-2"><input id="setup-add-scrape" type="checkbox" checked> Scrape</label>
+                            <label class="bg-[var(--surface-light)] border border-[var(--border)] rounded-xl p-2 text-[9px] font-black text-white flex items-center justify-center gap-2"><input id="setup-add-forward" type="checkbox" checked> Forward</label>
+                        </div>
+                        <button onclick="addSetupMarket()" class="w-full bg-[var(--green)] text-white py-3 rounded-xl font-black text-[10px] uppercase active:scale-95"><i class="fas fa-save mr-1"></i> Save / Add Market</button>
+                    </div>
                     <div class="native-card p-4 mb-3" style="border-color:rgba(255,59,48,0.35);background:rgba(255,59,48,0.05)">
                         <div class="flex items-center gap-3 mb-3">
                             <div class="w-10 h-10 rounded-xl bg-[rgba(255,59,48,0.15)] text-[var(--rose)] flex items-center justify-center border border-[rgba(255,59,48,0.25)]"><i class="fas fa-trash-can"></i></div>
