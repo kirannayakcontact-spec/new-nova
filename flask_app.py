@@ -1966,6 +1966,93 @@ def api_health_monitor():
     lf = state.get('loadForwarder', _default_load_forwarder_settings()) or {}
     rs = state.get('resultSettings', {'autoScrapeEnabled': True}) or {}
 
+    risk = state.get('riskSettings', _default_risk_settings()) or {}
+    wallets = state.get('wallets', {}) if isinstance(state.get('wallets', {}), dict) else {}
+    low_wallets = []
+    for uid, wallet in wallets.items():
+        if not isinstance(wallet, dict):
+            continue
+        available = _wallet_float(wallet.get('balance', 0)) + _wallet_float(wallet.get('creditLimit', 0))
+        if available <= 0:
+            low_wallets.append({
+                'userId': uid,
+                'name': wallet.get('name') or uid,
+                'available': round(available, 2),
+                'balance': round(_wallet_float(wallet.get('balance', 0)), 2),
+                'creditLimit': round(_wallet_float(wallet.get('creditLimit', 0)), 2)
+            })
+    low_wallets = sorted(low_wallets, key=lambda x: x.get('available', 0))[:8]
+    risk_summary = {
+        'marketDailyLimit': risk.get('marketDailyLimit', 0),
+        'digitDailyLimit': risk.get('digitDailyLimit', 0),
+        'userDailyLimit': risk.get('userDailyLimit', 0),
+        'warningPercent': risk.get('warningPercent', 80),
+        'autoLockOnLimit': risk.get('autoLockOnLimit', False),
+        'lowWallets': low_wallets
+    }
+    action_plan = []
+    if not (gateway.get('connected') is True):
+        action_plan.append({'level': 'danger', 'title': 'WhatsApp reconnect required', 'detail': 'Gateway/WhatsApp online nahi hai, QR scan ya session reset karo.', 'target': 'health'})
+    if len(state.get('resultTargets', []) or []) == 0 and not (lf.get('targets') or []):
+        action_plan.append({'level': 'warning', 'title': 'Result targets missing', 'detail': 'Result/Forward target save karo warna result send skip hoga.', 'target': 'results'})
+    if _count_pending(load_outbox):
+        action_plan.append({'level': 'warning', 'title': 'Load report pending', 'detail': f"{_count_pending(load_outbox)} load forward message pending hai.", 'target': 'forward'})
+    if len([p for p in payments if isinstance(p, dict) and p.get('status') == 'pending']):
+        action_plan.append({'level': 'info', 'title': 'Payments pending', 'detail': 'Pending payments verify karke wallet credit flow complete karo.', 'target': 'payments'})
+    if low_wallets:
+        action_plan.append({'level': 'warning', 'title': 'Wallet balance attention', 'detail': f"{len(low_wallets)} wallet zero/negative available balance par hai.", 'target': 'wallets'})
+    if not action_plan:
+        action_plan.append({'level': 'success', 'title': 'Professional flow healthy', 'detail': 'Entry, result, wallet aur delivery flow ready hai.', 'target': 'health'})
+
+    flow_status = [
+        {'key': 'entry', 'title': 'Entry', 'ok': bool((state.get('entrySettings') or {}).get('entryParserEnabled', True)), 'detail': f"Today {len(today_entries)} accepted / ₹{round(today_load, 2)} load"},
+        {'key': 'wallet', 'title': 'Wallet', 'ok': bool((state.get('walletSettings') or {}).get('walletEnabled', True)), 'detail': f"{len(wallets)} wallets, {len(low_wallets)} low balance"},
+        {'key': 'risk', 'title': 'Risk', 'ok': bool((state.get('entrySettings') or {}).get('riskLimitEnabled', True)), 'detail': f"Warn at {risk_summary['warningPercent']}%, auto-lock {'ON' if risk_summary['autoLockOnLimit'] else 'OFF'}"},
+        {'key': 'result', 'title': 'Result', 'ok': bool(rs.get('autoScrapeEnabled', True)), 'detail': f"{len(result_records_today or {})} markets saved today"},
+        {'key': 'settlement', 'title': 'Settlement', 'ok': bool((state.get('settlementSettings') or {}).get('enabled', True)), 'detail': f"{len(settlements_today or {})} settlements today"},
+        {'key': 'delivery', 'title': 'Delivery', 'ok': bool(gateway.get('connected') is True), 'detail': f"Targets {len(state.get('resultTargets', []) or [])} + Forward {len(lf.get('targets') or [])}"},
+        {'key': 'guard', 'title': 'Guard', 'ok': bool((state.get('spamGuardSettings') or {}).get('enabled', True)), 'detail': f"{len(state.get('spamGuardEvents', []) or []) if isinstance(state.get('spamGuardEvents', []), list) else 0} guard events"},
+        {'key': 'backup', 'title': 'Backup', 'ok': bool((state.get('backupSettings') or {}).get('lastBackupAt', '')), 'detail': (state.get('backupSettings') or {}).get('lastBackupAt', 'Backup recommended')}
+    ]
+    two_system_control = {
+        'bookie': {
+            'title': 'Bookie Customer Control',
+            'subtitle': 'Customer cards, accepted entries, wallet/payment handling aur VIP management.',
+            'ok': bool((state.get('entrySettings') or {}).get('entryParserEnabled', True)) and bool((state.get('walletSettings') or {}).get('walletEnabled', True)),
+            'primaryTarget': 'entries',
+            'stats': [
+                {'label': 'Accepted Today', 'value': len(today_entries)},
+                {'label': 'Today Load', 'value': f"₹{round(today_load, 2)}"},
+                {'label': 'Pending Pay', 'value': len([p for p in payments if isinstance(p, dict) and p.get('status') == 'pending'])},
+                {'label': 'Low Wallets', 'value': len(low_wallets)}
+            ],
+            'actions': [
+                {'label': 'Customer Cards', 'target': 'clients', 'icon': 'fa-users'},
+                {'label': 'Accept Entries', 'target': 'entries', 'icon': 'fa-receipt'},
+                {'label': 'Payments', 'target': 'payments', 'icon': 'fa-rupee-sign'},
+                {'label': 'Wallets', 'target': 'wallets', 'icon': 'fa-wallet'}
+            ]
+        },
+        'scheduleSender': {
+            'title': 'Card Schedule Sender',
+            'subtitle': 'Result targets, schedule sending, load forwarder aur WhatsApp delivery control.',
+            'ok': bool(gateway.get('connected') is True) and (bool(state.get('resultTargets', []) or []) or bool(lf.get('targets') or [])),
+            'primaryTarget': 'forward',
+            'stats': [
+                {'label': 'WA', 'value': 'ON' if gateway.get('connected') is True else 'OFF'},
+                {'label': 'Result Targets', 'value': len(state.get('resultTargets', []) or [])},
+                {'label': 'Forward Targets', 'value': len(lf.get('targets') or [])},
+                {'label': 'Queue', 'value': _count_pending(load_outbox)}
+            ],
+            'actions': [
+                {'label': 'Results', 'target': 'results', 'icon': 'fa-trophy'},
+                {'label': 'Schedule Sender', 'target': 'forward', 'icon': 'fa-share-nodes'},
+                {'label': 'WhatsApp Login', 'target': 'health', 'icon': 'fa-qrcode'},
+                {'label': 'Backup', 'target': 'backup', 'icon': 'fa-file-export'}
+            ]
+        }
+    }
+
     summary = {
         'firebase': {'status': 'success', 'url': get_firebase_url(), 'lastCheckedAt': _now_iso_local()},
         'gateway': gateway,
@@ -1976,7 +2063,7 @@ def api_health_monitor():
             'autoScrape': rs.get('autoScrapeEnabled', True),
             'entryParser': (state.get('entrySettings') or {}).get('entryParserEnabled', True),
             'marketTiming': (state.get('entrySettings') or {}).get('marketTimingEnabled', True),
-            'riskLimits': (state.get('entrySettings') or {}).get('riskLimitsEnabled', True),
+            'riskLimits': (state.get('entrySettings') or {}).get('riskLimitEnabled', True),
             'settlement': (state.get('settlementSettings') or {}).get('enabled', True),
             'paymentAutomation': (state.get('paymentSettings') or {}).get('paymentAutomationEnabled', True),
             'loadForwarder': lf.get('enabled', False),
@@ -1995,6 +2082,12 @@ def api_health_monitor():
             'resultTargets': len(state.get('resultTargets', []) or []),
             'auditEvents': len(audit),
             'guardEvents': len(state.get('spamGuardEvents', []) or []) if isinstance(state.get('spamGuardEvents', []), list) else 0
+        },
+        'professional': {
+            'flowStatus': flow_status,
+            'actionPlan': action_plan,
+            'riskSummary': risk_summary,
+            'systems': two_system_control
         },
         'last': {
             'backupAt': (state.get('backupSettings') or {}).get('lastBackupAt', ''),
@@ -3063,9 +3156,9 @@ HTML_TEMPLATE = """
             try{
                 const marketCloseTimes = {};
                 document.querySelectorAll('.entry-time-input[data-market]').forEach(inp => {
-                    const market = String(inp.getAttribute('data-market') || '').trim().toUpperCase().replace(/\s+/g, ' ');
+                    const market = String(inp.getAttribute('data-market') || '').trim().toUpperCase().replace(/\\s+/g, ' ');
                     const value = String(inp.value || '').trim();
-                    if(market && /^\d{2}:\d{2}$/.test(value)) marketCloseTimes[market] = value;
+                    if(market && /^\\d{2}:\\d{2}$/.test(value)) marketCloseTimes[market] = value;
                 });
                 const payload = {
                     marketTimingEnabled: !!document.getElementById('entryTimingToggle')?.checked,
@@ -3366,6 +3459,20 @@ TOTAL: 300</pre>
             const n = Number(v || 0);
             return '₹' + (Number.isInteger(n) ? String(n) : n.toFixed(2));
         }
+        function proLevelPill(level){
+            const map = {
+                success: 'bg-[rgba(0,194,111,0.16)] text-[var(--green)] border-[rgba(0,194,111,0.22)]',
+                info: 'bg-[rgba(42,171,238,0.14)] text-[var(--primary)] border-[rgba(42,171,238,0.22)]',
+                warning: 'bg-[rgba(250,199,72,0.14)] text-[var(--amber)] border-[rgba(250,199,72,0.22)]',
+                danger: 'bg-[rgba(255,93,93,0.14)] text-[var(--rose)] border-[rgba(255,93,93,0.22)]'
+            };
+            const label = {success:'READY', info:'INFO', warning:'CHECK', danger:'FIX'}[level] || 'INFO';
+            return `<span class="px-2 py-1 rounded-lg text-[9px] font-black uppercase border ${map[level] || map.info}">${label}</span>`;
+        }
+        function setMainNavFromHealth(target){
+            if(!target) return;
+            setMainNav(target);
+        }
         function renderHealthMonitorTab(){
             const h = appState.healthMonitor || {};
             const gw = h.gateway || {};
@@ -3380,6 +3487,11 @@ TOTAL: 300</pre>
             const firebaseUpdates = (h.last && h.last.recentFirebaseResults) || [];
             const recentUpdates = runtimeUpdates.length ? runtimeUpdates : firebaseUpdates;
             const recentSkipped = (gh.lastResultScrapeSkipped || []).slice(-6);
+            const professional = h.professional || {};
+            const flowStatus = professional.flowStatus || [];
+            const actionPlan = professional.actionPlan || [];
+            const riskSummary = professional.riskSummary || {};
+            const controlSystems = professional.systems || {};
             const gatewayOnline = gw.status === 'success' || gw.status === 'online';
             const waConnected = !!(gw.connected || gw.connected === true);
             const waLogin = h.waLogin || gw.waLogin || {};
@@ -3410,6 +3522,45 @@ TOTAL: 300</pre>
                             <div class="stat-box"><p class="stat-lbl">Today Load</p><p class="stat-val">${healthMoney(counts.todayLoad || 0)}</p></div>
                             <div class="stat-box"><p class="stat-lbl">Targets</p><p class="stat-val">${counts.resultTargets || 0}</p></div>
                         </div>
+                    </div>
+                    <div class="native-card p-4 mb-3 border border-[rgba(0,194,111,0.16)] bg-[linear-gradient(135deg,rgba(0,194,111,0.08),rgba(42,171,238,0.05))]">
+                        <div class="flex items-start justify-between gap-3 mb-3">
+                            <div>
+                                <p class="text-white font-black text-[13px] uppercase"><i class="fas fa-layer-group text-[var(--green)] mr-1"></i> 2-System Control</p>
+                                <p class="text-[var(--text-muted)] text-[10px] mt-1">Bookie Customer Control aur Card Schedule Sender ko app me alag-alag manage karo.</p>
+                            </div>
+                            ${healthStatusPill((actionPlan[0] || {}).level === 'success', 'READY', 'ACTION')}
+                        </div>
+                        <div class="grid grid-cols-1 gap-3 mb-3">
+                            ${['bookie','scheduleSender'].map(key => {
+                                const sys = controlSystems[key] || {};
+                                const accent = key === 'bookie' ? 'var(--green)' : 'var(--primary)';
+                                return `<div class="bg-[#17212B] border border-[var(--border)] rounded-2xl p-3">
+                                    <div class="flex items-start justify-between gap-2 mb-3">
+                                        <div>
+                                            <p class="text-white font-black text-[12px] uppercase">${key === 'bookie' ? '📇' : '📤'} ${htmlEscape(sys.title || key)}</p>
+                                            <p class="text-[var(--text-muted)] text-[9px] mt-1 leading-snug">${htmlEscape(sys.subtitle || '')}</p>
+                                        </div>
+                                        ${healthStatusPill(!!sys.ok, 'READY', 'SETUP')}
+                                    </div>
+                                    <div class="grid grid-cols-4 gap-1.5 mb-3 text-center">
+                                        ${(sys.stats || []).map(st => `<div class="bg-[var(--surface-light)] rounded-xl p-2 border border-[var(--border)]"><p class="stat-lbl text-[8px]">${htmlEscape(st.label || '')}</p><p class="text-white font-black text-[10px] truncate">${htmlEscape(String(st.value ?? '-'))}</p></div>`).join('')}
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        ${(sys.actions || []).map(a => `<button onclick="setMainNavFromHealth('${a.target || sys.primaryTarget || 'health'}')" class="bg-[rgba(42,171,238,0.08)] border border-[rgba(42,171,238,0.15)] text-white py-2.5 rounded-xl font-black text-[9px] uppercase active:scale-95"><i class="fas ${a.icon || 'fa-arrow-right'} mr-1" style="color:${accent}"></i>${htmlEscape(a.label || 'Open')}</button>`).join('')}
+                                    </div>
+                                </div>`;
+                            }).join('')}
+                        </div>
+                        <details class="bg-[#17212B] rounded-xl border border-[var(--border)] overflow-hidden">
+                            <summary class="px-3 py-3 text-white font-black text-[10px] uppercase cursor-pointer">Professional Checklist / Alerts</summary>
+                            <div class="px-3 pb-3 space-y-2">
+                                ${(actionPlan || []).map(a => `<button onclick="setMainNavFromHealth('${a.target || 'health'}')" class="w-full flex items-start justify-between gap-3 text-left bg-[var(--surface-light)] border border-[var(--border)] rounded-xl p-3 active:scale-95">
+                                    <div><p class="text-white font-black text-[10px] uppercase">${htmlEscape(a.title || 'Action')}</p><p class="text-[var(--text-muted)] text-[9px] mt-1 leading-snug">${htmlEscape(a.detail || '')}</p></div>${proLevelPill(a.level || 'info')}
+                                </button>`).join('')}
+                            </div>
+                        </details>
+                        ${(riskSummary.lowWallets || []).length ? `<details class="mt-3 bg-[#17212B] rounded-xl border border-[var(--border)] overflow-hidden"><summary class="px-3 py-3 text-white font-black text-[10px] uppercase cursor-pointer">Bookie Low Wallet Watchlist (${riskSummary.lowWallets.length})</summary><div class="px-3 pb-3 space-y-1">${riskSummary.lowWallets.map(w => `<div class="flex justify-between gap-2 text-[10px] py-1 border-b border-[var(--border)] last:border-0"><span class="text-[var(--text-muted)] truncate">${htmlEscape(w.name || w.userId)}</span><b class="text-[var(--rose)] shrink-0">${healthMoney(w.available || 0)}</b></div>`).join('')}</div></details>` : ''}
                     </div>
                     <div class="native-card p-4 mb-3 border border-[rgba(42,171,238,0.18)]">
                         <div class="flex items-center justify-between gap-3 mb-3">
@@ -3741,8 +3892,8 @@ TOTAL: 300</pre>
         }
         function resultDisplayView(rec){
             rec = rec || {};
-            const open = String(rec.openResult || '').trim().replace(/\s+/g, '');
-            const close = String(rec.closeResult || '').trim().replace(/\s+/g, '');
+            const open = String(rec.openResult || '').trim().replace(/\\s+/g, '');
+            const close = String(rec.closeResult || '').trim().replace(/\\s+/g, '');
             const openOk = resultStageLabel(open) === 'open';
             const closeOk = resultStageLabel(close) === 'close';
             const freshCloseOk = closeOk && openOk && close.startsWith(open);
@@ -4318,7 +4469,7 @@ TOTAL: 300</pre>
                     navItems.splice(6, 0, { id: 'forward', icon: 'fa-share-nodes', label: 'Forward' });
                     navItems.splice(7, 0, { id: 'guard', icon: 'fa-shield-halved', label: 'Guard' });
                     navItems.splice(8, 0, { id: 'backup', icon: 'fa-file-export', label: 'Backup' });
-                    navItems.splice(9, 0, { id: 'health', icon: 'fa-heart-pulse', label: 'Health' });
+                    navItems.splice(9, 0, { id: 'health', icon: 'fa-sliders', label: 'Control' });
                     navItems.splice(10, 0, { id: 'smart', icon: 'fa-bolt', label: 'AI Scan' });
                 }
             } else {
