@@ -273,6 +273,7 @@ function compactEntryMarket(v){ return normalizeEntryMarketText(v).replace(/[^A-
 function deletedMarketsList(state){
   const vals = []
     .concat(state?.settings?.setup?.deletedMarkets || [])
+    .concat(state?.settings?.setup?.markets?.deletedMarkets || [])
     .concat(state?.settings?.markets?.deletedMarkets || [])
     .concat(state?.deletedMarkets || []);
   return [...new Set(vals.map(normalizeEntryMarketText).filter(Boolean))];
@@ -283,7 +284,7 @@ function customMarketSources(state){
   const vals=[];
   const setup=state?.settings?.setup || {};
   const markets=state?.settings?.markets || {};
-  for(const src of [setup.customMarkets, markets.customMarkets]){
+  for(const src of [setup.customMarkets, setup.markets?.customMarkets, markets.customMarkets]){
     if(Array.isArray(src)) vals.push(...src);
     else if(src && typeof src === "object") vals.push(...Object.values(src));
   }
@@ -308,6 +309,14 @@ function activeMarketRegistry(state){
   }
   return [...base.values()];
 }
+
+function loadActiveMarketRegistry(state){ return activeMarketRegistry(state); }
+function isMarketDeletedOrDisabled(state, market){
+  const n = normalizeEntryMarketText(market).replace(/\s+(OPEN|CLOSE)$/i, '').trim();
+  const rec = activeMarketRegistry(state).find(r => r.market === n || (r.aliases||[]).map(normalizeEntryMarketText).includes(n));
+  return isDeletedMarket(state, market) || !rec || rec.enabled === false;
+}
+function normalizeMarketName(name){ return normalizeEntryMarketText(name); }
 
 function marketAliasesForDeleteName(market){
   const base = normalizeEntryMarketText(market).replace(/\s+(OPEN|CLOSE)$/i, '').trim();
