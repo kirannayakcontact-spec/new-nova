@@ -1758,6 +1758,51 @@ function findSettlementRecord(state, date, market, stage){
 function firebaseDataUrl(){
   return FIREBASE_URL.endsWith(".json") ? FIREBASE_URL : FIREBASE_URL + "/titan_master_data.json";
 }
+
+function gatewayCountPending(items){
+  return Array.isArray(items) ? items.filter(x => x && String(x.status || "").toLowerCase() === "pending").length : 0;
+}
+function gatewayTodayEntries(state){
+  return Array.isArray(state?.entries) ? state.entries.filter(x => x && x.status === "accepted" && x.date === todayISO()) : [];
+}
+function gatewayLowWallets(state){
+  const wallets = state?.wallets && typeof state.wallets === "object" ? state.wallets : {};
+  return Object.entries(wallets).filter(([,w]) => w && typeof w === "object")
+    .map(([userId,w]) => {
+      const balance = Number(w.balance || 0);
+      const creditLimit = Number(w.creditLimit || 0);
+      return { userId, name:w.name || userId, balance, creditLimit, available:Math.round((balance + creditLimit) * 100) / 100 };
+    })
+    .filter(x => x.available <= 0)
+    .sort((a,b) => a.available - b.available)
+    .slice(0, 8);
+}
+function buildGatewayControlSystems(state){
+  const todayEntries = gatewayTodayEntries(state);
+  const todayLoad = todayEntries.reduce((sum,e) => sum + Number(e.total || 0), 0);
+  const lowWallets = gatewayLowWallets(state);
+  const payments = Array.isArray(state?.payments) ? state.payments : [];
+  const lf = loadForwarderSettings(state || {});
+  const resultTargets = collectResultTargets(state || {});
+  const loadOutboxPending = gatewayCountPending(state?.loadForwarderOutbox);
+  const paymentOutboxPending = gatewayCountPending(state?.paymentOutbox);
+  return {
+    bookie:{
+      title:"Bookie Customer Control",
+      ok: state?.entrySettings?.entryParserEnabled !== false && state?.walletSettings?.walletEnabled !== false,
+      stats:{ acceptedToday:todayEntries.length, todayLoad:Math.round(todayLoad * 100) / 100, pendingPayments:payments.filter(x => x && x.status === "pending").length, paymentOutboxPending, lowWallets:lowWallets.length },
+      actions:["Customer Cards", "Accept Entries", "Payments", "Wallets"],
+      lowWallets
+    },
+    scheduleSender:{
+      title:"Card Schedule Sender",
+      ok: connected && (resultTargets.length > 0 || lf.targets.length > 0),
+      stats:{ whatsapp:connected ? "ON" : "OFF", resultTargets:resultTargets.length, forwardTargets:lf.targets.length, loadForwardPending:loadOutboxPending, scheduleTime:lf.scheduleTime || "" },
+      actions:["Results", "Schedule Sender", "WhatsApp Login", "Backup"],
+      last:{ resultSendAt:gatewayHealth.lastResultSendAt || "", resultSendSummary:gatewayHealth.lastResultSendSummary || "", loadForwarderSendAt:gatewayHealth.lastLoadForwarderSendAt || "", scheduleTickAt:gatewayHealth.lastScheduleTickAt || "" }
+    }
+  };
+}
 async function fetchFirebaseState(){
   const res = await axios.get(firebaseDataUrl(), { timeout: 15000 });
   const state = res.data || {};
@@ -2319,6 +2364,7 @@ app.get("/wa_qr_text", (req,res)=>{
 app.get("/status", async (req,res)=>{
   let adminEnabled = true;
   let counts = {};
+  let controlSystems = null;
   try {
     const st = await fetchFirebaseState(); global.__lastFirebaseState = st;
     adminEnabled = firebaseAutoScrapeEnabled(st);
@@ -2333,6 +2379,7 @@ app.get("/status", async (req,res)=>{
       acceptedEntriesToday: Array.isArray(st.entries) ? st.entries.filter(x => x && x.status === "accepted" && x.date === todayISO() && !isDeletedMarket(st, x.market || "")).length : 0,
       settlementsToday: st.settlementRecords?.[todayISO()] ? Object.keys(st.settlementRecords[todayISO()]).filter(m => !isDeletedMarket(st, m)).length : 0
     };
+    controlSystems = buildGatewayControlSystems(st);
   } catch(e) {
     counts.firebaseReadError = e.response ? `HTTP ${e.response.status}` : e.message;
   }
@@ -2340,8 +2387,16 @@ app.get("/status", async (req,res)=>{
     status:"success", connected, user:sock?.user || null, firebase:FIREBASE_URL, timezone:APP_TZ, now:nowHHMM(), date:todayISO(), cache:targetsCache.updatedAt,
     waLogin:{qrAvailable:!!lastQR, qrAt:lastQRAt, authDir:AUTH_DIR, resetCount:whatsappResetCount, lastSessionResetAt},
     resultScrape:{enabled:RESULT_SCRAPE_ENABLED && adminEnabled, envEnabled:RESULT_SCRAPE_ENABLED, adminEnabled, intervalMs:RESULT_SCRAPE_INTERVAL_MS, confirmCount:RESULT_SCRAPE_CONFIRM_COUNT, urls:RESULT_SCRAPE_URLS},
-    paymentOutbox:true, loadForwarder:true, spamGuard:true, counts, health:gatewayHealth
+    paymentOutbox:true, loadForwarder:true, spamGuard:true, counts, controlSystems, health:gatewayHealth
   });
+});
+app.get("/control_systems", async (req,res)=>{
+  try {
+    const state = await fetchFirebaseState();
+    res.json({status:"success", connected, now:nowHHMM(), date:todayISO(), timezone:APP_TZ, controlSystems:buildGatewayControlSystems(state), health:gatewayHealth});
+  } catch(e){
+    res.status(500).json({status:"error", connected, message:e.response ? `HTTP ${e.response.status}` : e.message, health:gatewayHealth});
+  }
 });
 app.get("/health", async (req,res)=>{
   try {
@@ -2357,6 +2412,7 @@ app.get("/health", async (req,res)=>{
       markets:{ active:reg.map(x => x.market), custom:reg.filter(x => x.custom).map(x => x.market) },
       queue:{ paymentPending:Array.isArray(state.paymentOutbox)?state.paymentOutbox.filter(x=>x&&x.status==="pending").length:0, loadForwardPending:Array.isArray(state.loadForwarderOutbox)?state.loadForwarderOutbox.filter(x=>x&&x.status==="pending"&&!isDeletedMarket(state, x.market || "")).length:0 },
       modules:{ entryParser: state.entrySettings?.entryParserEnabled !== false, settlement: state.settlementSettings?.enabled !== false, loadForwarder: lf.enabled === true, spamGuard: sg.enabled !== false },
+      controlSystems: buildGatewayControlSystems(state),
       health: gatewayHealth
     });
   } catch(e){
