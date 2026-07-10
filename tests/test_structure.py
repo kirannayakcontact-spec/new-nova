@@ -44,6 +44,13 @@ class ProjectStructureTests(unittest.TestCase):
         self.assertIn("git clone", content)
         self.assertIn("pm2 startOrReload", content)
 
+    def test_nova_opens_dashboard_after_deploy(self) -> None:
+        content = (ROOT / "scripts/nova.sh").read_text(encoding="utf-8")
+        self.assertIn("open_dashboard", content)
+        self.assertIn("com.android.chrome", content)
+        self.assertIn("termux-open-url", content)
+        self.assertIn("http://127.0.0.1", content)
+
     def test_secrets_are_ignored(self) -> None:
         ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn(".env", ignore)

@@ -110,6 +110,66 @@ ensure_pm2() {
   fi
 }
 
+dashboard_url() {
+  printf '%s' "${TITAN_NOVA_DASHBOARD_URL:-http://127.0.0.1:${WEB_PORT:-5000}}"
+}
+
+wait_for_dashboard() {
+  local url
+  url="$(dashboard_url)"
+  local attempt
+
+  for attempt in $(seq 1 25); do
+    if python - "$url" <<'PY' >/dev/null 2>&1
+import sys
+from urllib.request import Request, urlopen
+
+url = sys.argv[1]
+request = Request(url, headers={"User-Agent": "Titan-Nova-Launcher/1.0"})
+with urlopen(request, timeout=1.5) as response:
+    if response.status >= 500:
+        raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+open_dashboard() {
+  if [[ "${NOVA_OPEN_BROWSER:-1}" == "0" ]]; then
+    log "Automatic browser opening is disabled"
+    return 0
+  fi
+
+  local url
+  url="$(dashboard_url)"
+
+  log "Waiting for Titan Nova dashboard"
+  if ! wait_for_dashboard; then
+    warn "Dashboard did not become ready in time. Open manually: $url"
+    return 0
+  fi
+
+  log "Opening Titan Nova in Chrome: $url"
+
+  if command -v am >/dev/null 2>&1; then
+    if am start -a android.intent.action.VIEW -d "$url" -p com.android.chrome >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  if command -v termux-open-url >/dev/null 2>&1; then
+    termux-open-url "$url" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  warn "Chrome could not be opened automatically. Open manually: $url"
+}
+
 deploy_services() {
   cd "$REPO_DIR"
   ensure_pm2
@@ -162,9 +222,11 @@ case "$ACTION" in
     validate_project
     deploy_services
     log "Complete: clone/update/install/check/restart/deploy finished"
+    open_dashboard
     ;;
   restart)
     restart_services
+    open_dashboard
     ;;
   status)
     show_status
@@ -178,9 +240,9 @@ case "$ACTION" in
   *)
     cat <<'EOF'
 Usage:
-  nova          Clone/update/install/check/restart/deploy
+  nova          Clone/update/install/check/restart/deploy and open Chrome
   nova update   Same as nova
-  nova restart  Restart PM2 services
+  nova restart  Restart PM2 services and open Chrome
   nova status   Show services and health
   nova logs     Show PM2 logs
   nova stop     Stop both services
