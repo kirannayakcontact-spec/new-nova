@@ -20,7 +20,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m py_compile flask_app.py backend/run.py backend/wsgi.py scripts/health_check.py tests/test_structure.py
+      - run: python -m py_compile flask_app.py backend/run.py backend/wsgi.py backend/role_router_proxy.py scripts/health_check.py tests/test_structure.py
       - run: python -m unittest discover -s tests -v
 
   shell:
