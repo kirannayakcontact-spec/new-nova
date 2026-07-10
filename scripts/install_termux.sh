@@ -14,10 +14,9 @@ python -m pip install -r requirements.txt
 npm install
 chmod +x scripts/*.sh
 
-if [[ ! -f .env ]]; then
-  cp .env.example .env
-  echo "Created .env from .env.example. Edit FIREBASE_URL before production use."
-fi
+python scripts/ensure_runtime_env.py --prepare
+
+echo "Check FIREBASE_URL in .env before the first start."
 
 npm run check
 npm test
