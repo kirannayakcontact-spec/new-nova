@@ -14,8 +14,11 @@ class ProjectStructureTests(unittest.TestCase):
         required = [
             "flask_app.py",
             "Gateway.js",
+            "backend/run.py",
             "backend/wsgi.py",
             "bot/index.js",
+            "scripts/nova.sh",
+            "scripts/install_nova_command.sh",
             "scripts/start_web.sh",
             "scripts/start_bot.sh",
             "ecosystem.config.js",
@@ -25,7 +28,7 @@ class ProjectStructureTests(unittest.TestCase):
         self.assertEqual(missing, [], f"Missing required files: {missing}")
 
     def test_python_entrypoints_compile(self) -> None:
-        for relative in ("flask_app.py", "backend/wsgi.py", "scripts/health_check.py"):
+        for relative in ("flask_app.py", "backend/run.py", "backend/wsgi.py", "scripts/health_check.py"):
             py_compile.compile(str(ROOT / relative), doraise=True)
 
     def test_package_scripts_exist(self) -> None:
@@ -33,6 +36,13 @@ class ProjectStructureTests(unittest.TestCase):
         scripts = package.get("scripts", {})
         for name in ("web", "bot", "check", "test", "pm2:start"):
             self.assertIn(name, scripts)
+
+    def test_nova_command_has_expected_actions(self) -> None:
+        content = (ROOT / "scripts/nova.sh").read_text(encoding="utf-8")
+        for action in ("deploy", "update", "restart", "status", "logs", "stop"):
+            self.assertIn(action, content)
+        self.assertIn("git clone", content)
+        self.assertIn("pm2 startOrReload", content)
 
     def test_secrets_are_ignored(self) -> None:
         ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
