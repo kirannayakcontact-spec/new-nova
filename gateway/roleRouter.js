@@ -285,11 +285,13 @@ function deliveryKey(target, text) {
 
 function wasRecentlyDelivered(target, text) {
   const now = Date.now();
-  const key = deliveryKey(target, text);
-  const old = Number(recentDeliveries.get(key) || 0);
-  recentDeliveries.set(key, now);
+  const old = Number(recentDeliveries.get(deliveryKey(target, text)) || 0);
   for (const [entry, at] of recentDeliveries) if (now - at > 120000) recentDeliveries.delete(entry);
   return old > 0 && now - old < 30000;
+}
+
+function markDelivered(target, text) {
+  recentDeliveries.set(deliveryKey(target, text), Date.now());
 }
 
 function syntheticSendResult(id) {
@@ -322,6 +324,7 @@ function patchSocket(socket) {
       for (const target of forcedTargets) {
         if (wasRecentlyDelivered(target, text)) continue;
         const result = await originalSendMessage(target, payload, options);
+        markDelivered(target, text);
         if (!firstResult) firstResult = result;
       }
       return firstResult || syntheticSendResult("ROLE_ROUTER_DEDUPED");
