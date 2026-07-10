@@ -7,6 +7,7 @@ existing dashboard feature set.
 
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import hmac
 import html
@@ -34,6 +35,7 @@ _WRITE_LOCK = threading.RLock()
 _LOGIN_LOCK = threading.Lock()
 _LOGIN_ATTEMPTS: dict[str, deque[_dt.datetime]] = defaultdict(deque)
 _CONFIGURED_APP_IDS: set[int] = set()
+_ETAG_FIELD = "_titanFirebaseEtag"
 
 
 def _is_placeholder(value: str) -> bool:
@@ -198,24 +200,27 @@ def _install_firebase_guards(module: Any, firebase_url: str) -> None:
         _FIREBASE_CONTEXT.etag = response.headers.get("ETag") or response.headers.get("etag")
         _FIREBASE_CONTEXT.url = firebase_url
         payload = response.json()
+        if isinstance(payload, dict) and _FIREBASE_CONTEXT.etag:
+            payload[_ETAG_FIELD] = _FIREBASE_CONTEXT.etag
         return payload if payload else None
 
     def guarded_save_to_firebase(data: Any) -> bool:
-        etag = getattr(_FIREBASE_CONTEXT, "etag", "")
-        if getattr(_FIREBASE_CONTEXT, "url", "") != firebase_url:
-            etag = ""
+        payload = copy.deepcopy(data)
+        etag = ""
+        if isinstance(payload, dict):
+            etag = str(payload.pop(_ETAG_FIELD, "") or "")
+        if not etag and getattr(_FIREBASE_CONTEXT, "url", "") == firebase_url:
+            etag = str(getattr(_FIREBASE_CONTEXT, "etag", "") or "")
         if not etag:
-            current = requests.get(
-                firebase_url,
-                timeout=15,
-                headers={"X-Firebase-ETag": "true", "Cache-Control": "no-cache"},
+            raise FirebaseConflictError(
+                "This state snapshot has no Firebase ETag. Refresh the dashboard before saving."
             )
-            current.raise_for_status()
-            etag = current.headers.get("ETag") or current.headers.get("etag")
-        headers = {"Cache-Control": "no-cache"}
-        if etag:
-            headers["If-Match"] = etag
-        response = requests.put(firebase_url, json=data, timeout=20, headers=headers)
+        headers = {
+            "Cache-Control": "no-cache",
+            "If-Match": etag,
+            "X-Firebase-ETag": "true",
+        }
+        response = requests.put(firebase_url, json=payload, timeout=20, headers=headers)
         if response.status_code == 412:
             raise FirebaseConflictError(
                 "Firebase data changed in another process. The stale write was blocked; refresh and retry."
@@ -276,6 +281,32 @@ def _replace_api_views(app: Any, module: Any, admin_api_token: str) -> None:
             )
 
         app.view_functions[payments_endpoint] = protected_payments_view
+
+
+def _inject_fetch_etag_bridge(response: Response) -> Response:
+    if request.path != "/" or "text/html" not in str(response.content_type or ""):
+        return response
+    script = r"""<script>
+(function(){
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = async function(){
+    const response = await originalFetch.apply(window, arguments);
+    const etag = response.headers.get('X-Titan-Firebase-ETag');
+    if(etag){
+      try { if(typeof appState !== 'undefined' && appState) appState._titanFirebaseEtag = etag; } catch(_e) {}
+    }
+    if(response.headers.get('X-Titan-State-Reload') === '1'){
+      setTimeout(function(){ window.location.reload(); }, 150);
+    }
+    return response;
+  };
+})();
+</script>"""
+    body = response.get_data(as_text=True)
+    if "</body>" in body:
+        response.set_data(body.replace("</body>", script + "</body>", 1))
+        response.headers["Content-Length"] = str(len(response.get_data()))
+    return response
 
 
 def configure_application(module: Any) -> Any:
@@ -393,7 +424,12 @@ def configure_application(module: Any) -> Any:
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         if request.path.startswith("/api/") or request.path == "/":
             response.headers["Cache-Control"] = "no-store, max-age=0"
-        return response
+        current_etag = str(getattr(_FIREBASE_CONTEXT, "etag", "") or "")
+        if current_etag:
+            response.headers["X-Titan-Firebase-ETag"] = current_etag
+        elif request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            response.headers["X-Titan-State-Reload"] = "1"
+        return _inject_fetch_etag_bridge(response)
 
     @app.teardown_request
     def titan_security_teardown_request(_error: BaseException | None) -> None:
