@@ -14,4 +14,4 @@ fi
 export APP_TZ="${APP_TZ:-Asia/Kolkata}"
 export PORT="${GATEWAY_PORT:-${PORT:-3000}}"
 
-exec node Gateway.js
+exec node --require ./gateway/roleRouter.js Gateway.js
