@@ -2,23 +2,6 @@
 
 Production-oriented Flask dashboard and WhatsApp gateway for Termux, Linux, or PM2.
 
-## Phase 1 security and stability
-
-The official launchers now enable these protections automatically:
-
-- Admin password login with secure Flask session cookies.
-- Admin API token support through `X-Titan-Admin-Token`.
-- VIP-scoped `/api/state` and `/api/payments` responses instead of exposing master data.
-- Same-origin protection for dashboard write requests.
-- Serialized Flask writes and Firebase ETag conditional writes.
-- Gateway ETag protection that blocks stale full-state overwrites.
-- Gateway binds to `127.0.0.1` by default.
-- Gateway API token protection when non-loopback access is intentionally enabled.
-- Missing/placeholder Firebase configuration blocks startup.
-- Payment approval requests are serialized, preserving the existing idempotency checks.
-
-Secrets are generated locally in `.env`; they are never committed to Git.
-
 ## One-command deployment
 
 After the command is installed, use only:
@@ -27,7 +10,19 @@ After the command is installed, use only:
 nova
 ```
 
-That command updates dependencies, runs checks, reloads PM2 services, performs health checks, and opens the dashboard.
+That single command performs the complete workflow:
+
+```text
+Repository missing → clone
+Repository present → pull latest main
+Install/update Python and Node dependencies
+Run syntax checks and tests
+Start or reload titan-web and titan-gateway with PM2
+Save PM2 process list
+Show service and health status
+Wait until the dashboard is ready
+Open http://127.0.0.1:5000 automatically in Chrome
+```
 
 Useful controls:
 
@@ -38,91 +33,74 @@ nova logs
 nova stop
 ```
 
+`nova restart` also opens the dashboard in Chrome after the services are ready.
+
 To disable automatic browser opening for one run:
 
 ```bash
 NOVA_OPEN_BROWSER=0 nova
 ```
 
-## First secure setup
+## Install the `nova` command on an existing clone
+
+```bash
+cd ~/new-nova && git pull && bash scripts/install_nova_command.sh
+```
+
+After this one-time command, future clone/update/restart/deploy work requires only `nova`.
+
+## Project structure
+
+```text
+new-nova/
+├── flask_app.py
+├── Gateway.js
+├── backend/
+│   ├── __init__.py
+│   ├── run.py
+│   ├── wsgi.py
+│   └── README.md
+├── bot/
+│   ├── index.js
+│   └── README.md
+├── config/
+│   └── README.md
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DEPLOYMENT_TERMUX.md
+│   └── OPERATIONS.md
+├── scripts/
+│   ├── nova.sh
+│   ├── install_nova_command.sh
+│   ├── install_termux.sh
+│   ├── update_termux.sh
+│   ├── start_web.sh
+│   ├── start_bot.sh
+│   └── health_check.py
+├── tests/
+│   └── test_structure.py
+├── .github/workflows/ci.yml
+├── .env.example
+├── .gitignore
+├── ecosystem.config.js
+├── package.json
+├── requirements.txt
+└── Procfile
+```
+
+The original runtime entrypoints remain available so existing Termux commands do not break.
+
+## First installation without an existing clone
 
 ```bash
 cd ~
 git clone https://github.com/kirannayakcontact-spec/new-nova.git
 cd new-nova
 bash scripts/install_termux.sh
-nano .env
-```
-
-Set the real Firebase URL:
-
-```env
-FIREBASE_URL=https://YOUR-PROJECT-default-rtdb.firebaseio.com/titan_master_data.json
-```
-
-The installer prints the generated admin password once. It is also stored locally in `.env` as `ADMIN_PASSWORD`.
-
-Then start:
-
-```bash
 nova
 ```
 
-Open `http://127.0.0.1:5000` and log in with that password.
-
-## Existing installation
-
-```bash
-cd ~/new-nova
-git pull
-bash scripts/install_nova_command.sh
-nova
-```
-
-On the first secure start, missing secrets are generated automatically. Check the terminal or `pm2 logs titan-web` for the generated admin password if it was newly created.
-
-## Project structure
-
-```text
-new-nova/
-├── flask_app.py                 # legacy feature core
-├── Gateway.js                   # legacy gateway feature core
-├── sitecustomize.py             # secures legacy direct Python start
-├── backend/
-│   ├── run.py
-│   ├── wsgi.py
-│   └── runtime.py               # login, authorization, Firebase CAS
-├── bot/
-│   ├── index.js
-│   └── runtime_guard.js         # loopback/API auth, Firebase CAS
-├── scripts/
-│   ├── nova.sh
-│   ├── ensure_runtime_env.py
-│   ├── install_termux.sh
-│   ├── start_web.sh
-│   └── start_bot.sh
-├── tests/
-│   ├── test_structure.py
-│   └── test_runtime_security.py
-├── .github/workflows/ci.yml
-├── .env.example
-├── ecosystem.config.js
-├── package.json
-└── requirements.txt
-```
-
-The root feature files remain available for compatibility. Use the official scripts or `nova` so the runtime guards are active.
-
-## Network policy
-
-The web dashboard and gateway bind to loopback by default:
-
-```env
-HOST=127.0.0.1
-GATEWAY_HOST=127.0.0.1
-```
-
-For deliberate LAN access, change `HOST=0.0.0.0`; admin login still protects the dashboard. Keep the gateway on loopback unless a trusted reverse proxy supplies `X-Titan-Gateway-Token`.
+The installer creates `.env` from `.env.example` when it is missing. Verify `FIREBASE_URL` before production use.
 
 ## Manual start
 
@@ -155,5 +133,5 @@ python scripts/health_check.py
 ## Production entrypoint
 
 ```bash
-gunicorn --bind 127.0.0.1:5000 backend.wsgi:app
+gunicorn --bind 0.0.0.0:5000 backend.wsgi:app
 ```
