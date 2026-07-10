@@ -10,7 +10,7 @@
 # Local JSON storage removed
 # ==========================================================
 
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, render_template, request, jsonify
 import json
 import os
 import uuid
@@ -893,7 +893,7 @@ def index():
             fm, fb, fc = reg['markets'], reg['baseMarkets'], reg['chartLinks']
             isolated_state["settings"] = state.get("settings", {})
             isolated_state["deletedMarkets"] = state.get("deletedMarkets", [])
-            return render_template_string(HTML_TEMPLATE, state=isolated_state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=False, manifest_url=manifest_url)
+            return render_template("index.html", state=isolated_state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=False, manifest_url=manifest_url)
         else:
             blocked_html = """
             <!DOCTYPE html>
@@ -915,7 +915,7 @@ def index():
         state["activeId"] = "admin1"
         reg = get_active_market_registry(state)
         fm, fb, fc = reg['markets'], reg['baseMarkets'], reg['chartLinks']
-        return render_template_string(HTML_TEMPLATE, state=state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=True, manifest_url=manifest_url)
+        return render_template("index.html", state=state, markets=fm, baseMarkets=fb, chartLinks=fc, is_master=True, manifest_url=manifest_url)
 
 @app.route('/save', methods=['POST'])
 def save():
