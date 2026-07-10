@@ -14,14 +14,10 @@ class ProjectStructureTests(unittest.TestCase):
         required = [
             "flask_app.py",
             "Gateway.js",
-            "sitecustomize.py",
             "backend/run.py",
             "backend/wsgi.py",
-            "backend/runtime.py",
             "bot/index.js",
-            "bot/runtime_guard.js",
             "scripts/nova.sh",
-            "scripts/ensure_runtime_env.py",
             "scripts/install_nova_command.sh",
             "scripts/start_web.sh",
             "scripts/start_bot.sh",
@@ -32,15 +28,7 @@ class ProjectStructureTests(unittest.TestCase):
         self.assertEqual(missing, [], f"Missing required files: {missing}")
 
     def test_python_entrypoints_compile(self) -> None:
-        for relative in (
-            "flask_app.py",
-            "backend/run.py",
-            "backend/wsgi.py",
-            "backend/runtime.py",
-            "sitecustomize.py",
-            "scripts/ensure_runtime_env.py",
-            "scripts/health_check.py",
-        ):
+        for relative in ("flask_app.py", "backend/run.py", "backend/wsgi.py", "scripts/health_check.py"):
             py_compile.compile(str(ROOT / relative), doraise=True)
 
     def test_package_scripts_exist(self) -> None:
