@@ -9,7 +9,7 @@
     "bot": "bash scripts/start_bot.sh",
     "start": "bash scripts/start_bot.sh",
     "check:python": "python -m py_compile flask_app.py backend/run.py backend/wsgi.py scripts/health_check.py tests/test_structure.py",
-    "check:node": "node --check Gateway.js && node --check gateway/roleRouter.js && node --check bot/index.js && node --check ecosystem.config.js",
+    "check:node": "node --check Gateway.js && node --check gateway/roleRouter.js && node --check gateway/roleRouterUi.js && node --check bot/index.js && node --check ecosystem.config.js",
     "check": "npm run check:python && npm run check:node",
     "test": "python -m unittest discover -s tests -v",
     "pm2:start": "pm2 start ecosystem.config.js",
