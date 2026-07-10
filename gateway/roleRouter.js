@@ -1,29 +1,15 @@
 "use strict";
 
-// Runtime role-routing overlay for the existing monolithic Gateway.js.
-// It intentionally does not write role targets into Firebase: Admin root PUT remains
-// the source of truth, while these environment values act only at gateway runtime.
+// Runtime WhatsApp role routing overlay for the existing monolithic Gateway.js.
+// KALYAN_* values are WhatsApp group identifiers/names, not a market filter.
+// Runtime target overlays are removed before Gateway root PUT writes so Manual
+// Overwrite Mode remains the source of truth for the main Titan state.
 
 const crypto = require("crypto");
 
 const ROUTER_ENABLED = String(process.env.ROLE_ROUTER_ENABLED || "1") !== "0";
 const OVERLAY_META = Symbol("titanRoleRouterOverlay");
 const recentDeliveries = new Map();
-
-const MARKET_NAMES = [
-  "SRIDEV DAY OPEN", "SRIDEV DAY CLOSE", "TIME BAZAR OPEN", "MADHUR DAY OPEN",
-  "TIME BAZAR CLOSE", "MADHUR DAY CLOSE", "MILAN DAY OPEN", "RAJDHANI DAY OPEN",
-  "SUPREME DAY OPEN", "KALYAN OPEN", "MILAN DAY CLOSE", "RAJDHANI DAY CLOSE",
-  "SUPREME DAY CLOSE", "KALYAN CLOSE", "SRIDEVI NIGHT OPEN", "SRIDEVI NIGHT CLOSE",
-  "MADHUR NIGHT OPEN", "SUPREME NIGHT OPEN", "MILAN NIGHT OPEN", "KALYAN NIGHT OPEN",
-  "RAJDHANI NIGHT OPEN", "MAIN BAZAR OPEN", "MADHUR NIGHT CLOSE", "SUPREME NIGHT CLOSE",
-  "MILAN NIGHT CLOSE", "KALYAN NIGHT CLOSE", "RAJDHANI NIGHT CLOSE", "MAIN BAZAR CLOSE"
-];
-const BASE_MARKET_NAMES = [
-  "SRIDEV DAY", "TIME BAZAR", "MADHUR DAY", "MILAN DAY", "RAJDHANI DAY", "SUPREME DAY",
-  "KALYAN", "SRIDEVI NIGHT", "MADHUR NIGHT", "SUPREME NIGHT", "MILAN NIGHT",
-  "KALYAN NIGHT", "RAJDHANI NIGHT", "MAIN BAZAR"
-];
 
 function normalizeJid(value) {
   const raw = String(value || "").trim().replace(/[<>]/g, "");
@@ -40,6 +26,7 @@ function envTargets(name) {
   return out;
 }
 
+// Arrays intentionally remain mutable. roleRouterUi.js updates these arrays live.
 const ROLE_TARGETS = Object.freeze({
   entry: envTargets("KALYAN_ADMIN_GROUP"),
   bookie: envTargets("KALYAN_ADMIN_GROUP"),
@@ -135,6 +122,8 @@ function baseMarket(value) {
   return normalizeMarket(value).replace(/\s+(OPEN|CLOSE)$/i, "").trim();
 }
 
+// Kept for backwards compatibility with callers/tests. It is no longer used to
+// decide role routing because KALYAN_* is a group name, not a market scope.
 function isKalyanMarket(value) {
   return baseMarket(value) === "KALYAN";
 }
@@ -145,10 +134,10 @@ function injectScheduleTargets(state, changes) {
   for (const [profileId, profile] of Object.entries(profiles)) {
     const dayRecords = profile && profile.dayRecords && typeof profile.dayRecords === "object" ? profile.dayRecords : {};
     for (const [date, day] of Object.entries(dayRecords)) {
-      for (const [store, names] of [["data", MARKET_NAMES], ["pannelData", MARKET_NAMES], ["jodiData", BASE_MARKET_NAMES]]) {
+      for (const store of ["data", "pannelData", "jodiData"]) {
         const records = day && day[store] && typeof day[store] === "object" ? day[store] : {};
         for (const [index, rec] of Object.entries(records)) {
-          if (!rec || typeof rec !== "object" || !isKalyanMarket(names[Number(index)] || "")) continue;
+          if (!rec || typeof rec !== "object") continue;
           setOverlay(state, ["profiles", profileId, "dayRecords", date, store, index, "schTargets"], ROLE_TARGETS.schedule, changes);
           setOverlay(state, ["profiles", profileId, "dayRecords", date, store, index, "targets"], ROLE_TARGETS.schedule, changes);
         }
@@ -171,9 +160,8 @@ function injectRoleTargets(state) {
     setOverlay(state, ["adminAlertTargets"], ROLE_TARGETS.bookie, changes);
   }
   if (ROLE_TARGETS.result.length) {
-    const resultTargets = uniqueTargets(state.resultTargets || [], state.resultSettings && state.resultSettings.targets, ROLE_TARGETS.result);
-    setOverlay(state, ["resultTargets"], resultTargets, changes);
-    setOverlay(state, ["resultSettings", "targets"], resultTargets, changes);
+    setOverlay(state, ["resultTargets"], ROLE_TARGETS.result, changes);
+    setOverlay(state, ["resultSettings", "targets"], ROLE_TARGETS.result, changes);
     setOverlay(state, ["resultSettings", "useForwardTargetsForResults"], false, changes);
   }
   if (ROLE_TARGETS.forward.length) {
@@ -186,7 +174,7 @@ function injectRoleTargets(state) {
   }
 
   injectScheduleTargets(state, changes);
-  setOverlay(state, ["marketRoleTargets", "KALYAN"], {
+  setOverlay(state, ["roleRouterRuntime"], {
     entryTargets: ROLE_TARGETS.entry,
     bookieTargets: ROLE_TARGETS.bookie,
     scheduleTargets: ROLE_TARGETS.schedule,
@@ -198,7 +186,7 @@ function injectRoleTargets(state) {
   return state;
 }
 
-function isFirebaseUrl(value) {
+function isFirebaseRootUrl(value) {
   const url = String(value || "");
   return /firebaseio\.com/i.test(url) && /(?:titan_master_data)?\.json(?:[?#]|$)/i.test(url);
 }
@@ -217,13 +205,13 @@ function patchAxios() {
   const originalPut = axios.put.bind(axios);
   axios.get = async function patchedGet(url, ...args) {
     const response = await originalGet(url, ...args);
-    if (isFirebaseUrl(url) && response && response.data && typeof response.data === "object") {
+    if (isFirebaseRootUrl(url) && response && response.data && typeof response.data === "object") {
       injectRoleTargets(response.data);
     }
     return response;
   };
   axios.put = async function patchedPut(url, data, ...args) {
-    if (isFirebaseUrl(url) && data && typeof data === "object" && data[OVERLAY_META]) {
+    if (isFirebaseRootUrl(url) && data && typeof data === "object" && data[OVERLAY_META]) {
       const clean = cloneJson(data);
       restoreOverlay(clean, data[OVERLAY_META]);
       return originalPut(url, clean, ...args);
@@ -269,11 +257,11 @@ function isEntryCard(text) {
 
 function classifyOutbound(text) {
   const upper = String(text || "").toUpperCase();
-  if (upper.includes("TITAN NOVA INTEL")) return { role: "schedule", kalyanOnly: true };
-  if (upper.includes("TITAN NOVA RESULT")) return { role: "result", kalyanOnly: true };
-  if (upper.includes("TITAN NOVA LOAD REPORT")) return { role: "forward", kalyanOnly: false };
+  if (upper.includes("TITAN NOVA INTEL")) return { role: "schedule" };
+  if (upper.includes("TITAN NOVA RESULT")) return { role: "result" };
+  if (upper.includes("TITAN NOVA LOAD REPORT")) return { role: "forward" };
   if (/WITHDRAW(?:AL)?\s+(?:REQUEST|ALERT)|PAYMENT\s+(?:NOTIFICATION|ALERT|RECEIVED)|ADMIN\s+ALERT|BOOKIE\s+ALERT/i.test(upper)) {
-    return { role: "bookie", kalyanOnly: false };
+    return { role: "bookie" };
   }
   return null;
 }
@@ -306,28 +294,26 @@ function patchSocket(socket) {
     socket.sendMessage = async function routedSendMessage(jid, payload, options) {
       const text = payloadText(payload);
       const route = classifyOutbound(text);
-      if (!route || !ROLE_TARGETS[route.role] || !ROLE_TARGETS[route.role].length) {
-        return originalSendMessage(jid, payload, options);
-      }
-
-      const market = marketFromText(text);
-      const kalyan = isKalyanMarket(market);
-      const currentJid = normalizeJid(jid);
-      const forcedTargets = ROLE_TARGETS[route.role];
-
-      if (route.kalyanOnly && !kalyan) {
-        if (forcedTargets.includes(currentJid)) return syntheticSendResult("ROLE_ROUTER_NON_KALYAN_SUPPRESSED");
+      const forcedTargets = route && ROLE_TARGETS[route.role];
+      if (!route || !Array.isArray(forcedTargets) || !forcedTargets.length) {
         return originalSendMessage(jid, payload, options);
       }
 
       let firstResult = null;
+      let firstError = null;
       for (const target of forcedTargets) {
         if (wasRecentlyDelivered(target, text)) continue;
-        const result = await originalSendMessage(target, payload, options);
-        markDelivered(target, text);
-        if (!firstResult) firstResult = result;
+        try {
+          const result = await originalSendMessage(target, payload, options);
+          markDelivered(target, text);
+          if (!firstResult) firstResult = result;
+        } catch (error) {
+          if (!firstError) firstError = error;
+        }
       }
-      return firstResult || syntheticSendResult("ROLE_ROUTER_DEDUPED");
+      if (firstResult) return firstResult;
+      if (firstError) throw firstError;
+      return syntheticSendResult("ROLE_ROUTER_DEDUPED");
     };
   }
 
@@ -341,10 +327,9 @@ function patchSocket(socket) {
         const accepted = [];
         for (const message of (packet && packet.messages) || []) {
           const text = messageText(message);
-          const market = marketFromText(text);
           const remoteJid = normalizeJid(message && message.key && message.key.remoteJid);
-          if (isEntryCard(text) && isKalyanMarket(market) && !ROLE_TARGETS.entry.includes(remoteJid)) {
-            console.warn(`[roleRouter] KALYAN entry ignored outside configured Entry Target: ${remoteJid || "unknown_chat"}`);
+          if (isEntryCard(text) && !ROLE_TARGETS.entry.includes(remoteJid)) {
+            console.warn(`[roleRouter] Entry card ignored outside configured Entry Target: ${remoteJid || "unknown_chat"}`);
             continue;
           }
           accepted.push(message);
