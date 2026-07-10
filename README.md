@@ -2,19 +2,56 @@
 
 Production-oriented Flask dashboard and WhatsApp gateway for Termux, Linux, or PM2.
 
+## One-command deployment
+
+After the command is installed, use only:
+
+```bash
+nova
+```
+
+That single command performs the complete workflow:
+
+```text
+Repository missing → clone
+Repository present → pull latest main
+Install/update Python and Node dependencies
+Run syntax checks and tests
+Start or reload titan-web and titan-gateway with PM2
+Save PM2 process list
+Show service and health status
+```
+
+Useful controls:
+
+```bash
+nova restart
+nova status
+nova logs
+nova stop
+```
+
+## Install the `nova` command on an existing clone
+
+```bash
+cd ~/new-nova && git pull && bash scripts/install_nova_command.sh
+```
+
+After this one-time command, future clone/update/restart/deploy work requires only `nova`.
+
 ## Project structure
 
 ```text
 new-nova/
-├── flask_app.py                 # Flask dashboard/API compatibility runtime
-├── Gateway.js                  # WhatsApp gateway compatibility runtime
+├── flask_app.py
+├── Gateway.js
 ├── backend/
 │   ├── __init__.py
-│   ├── run.py                  # Environment-aware Termux/development launcher
-│   ├── wsgi.py                 # Gunicorn/WSGI entrypoint
+│   ├── run.py
+│   ├── wsgi.py
 │   └── README.md
 ├── bot/
-│   ├── index.js                # Structured Node entrypoint
+│   ├── index.js
 │   └── README.md
 ├── config/
 │   └── README.md
@@ -23,6 +60,8 @@ new-nova/
 │   ├── DEPLOYMENT_TERMUX.md
 │   └── OPERATIONS.md
 ├── scripts/
+│   ├── nova.sh
+│   ├── install_nova_command.sh
 │   ├── install_termux.sh
 │   ├── update_termux.sh
 │   ├── start_web.sh
@@ -39,22 +78,21 @@ new-nova/
 └── Procfile
 ```
 
-The original runtime entrypoints remain available so existing Termux commands do not break. Operational files are separated into backend, bot, configuration, deployment, documentation, and test layers.
+The original runtime entrypoints remain available so existing Termux commands do not break.
 
-## First installation in Termux
+## First installation without an existing clone
 
 ```bash
 cd ~
 git clone https://github.com/kirannayakcontact-spec/new-nova.git
 cd new-nova
 bash scripts/install_termux.sh
+nova
 ```
 
-The installer creates `.env` from `.env.example` when it is missing. Edit `.env` and set the correct Firebase URL before production use.
+The installer creates `.env` from `.env.example` when it is missing. Verify `FIREBASE_URL` before production use.
 
-## Start manually
-
-Open two Termux sessions.
+## Manual start
 
 Session 1:
 
@@ -74,30 +112,6 @@ Dashboard: `http://127.0.0.1:5000`
 
 Gateway health: `http://127.0.0.1:3000/health`
 
-## Update with one command
-
-```bash
-cd ~/new-nova && bash scripts/update_termux.sh
-```
-
-The script pulls the latest branch, refreshes Python and Node dependencies, runs validation, and reloads PM2 when PM2 is installed.
-
-## PM2 mode
-
-```bash
-npm install -g pm2
-npm run pm2:start
-pm2 save
-```
-
-Useful commands:
-
-```bash
-npm run pm2:status
-npm run pm2:logs
-npm run pm2:restart
-```
-
 ## Validation
 
 ```bash
@@ -108,10 +122,6 @@ python scripts/health_check.py
 
 ## Production entrypoint
 
-For a Linux server with Gunicorn:
-
 ```bash
 gunicorn --bind 0.0.0.0:5000 backend.wsgi:app
 ```
-
-See `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT_TERMUX.md`, and `docs/OPERATIONS.md` for details.

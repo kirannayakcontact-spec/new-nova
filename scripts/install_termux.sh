@@ -16,11 +16,12 @@ chmod +x scripts/*.sh
 
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  echo "Created .env from .env.example. Edit it before production use."
+  echo "Created .env from .env.example. Edit FIREBASE_URL before production use."
 fi
 
 npm run check
+npm test
+bash scripts/install_nova_command.sh
 
 echo "Titan Nova installation completed."
-echo "Web: bash scripts/start_web.sh"
-echo "Bot: bash scripts/start_bot.sh"
+echo "From now on run: nova"

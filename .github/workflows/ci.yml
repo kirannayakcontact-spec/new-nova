@@ -23,6 +23,17 @@ jobs:
       - run: python -m py_compile flask_app.py backend/run.py backend/wsgi.py scripts/health_check.py tests/test_structure.py
       - run: python -m unittest discover -s tests -v
 
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n scripts/nova.sh
+      - run: bash -n scripts/install_nova_command.sh
+      - run: bash -n scripts/install_termux.sh
+      - run: bash -n scripts/update_termux.sh
+      - run: bash -n scripts/start_web.sh
+      - run: bash -n scripts/start_bot.sh
+
   node:
     runs-on: ubuntu-latest
     steps:
