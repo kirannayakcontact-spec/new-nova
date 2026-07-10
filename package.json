@@ -1,6 +1,6 @@
 {
   "name": "titan-nova",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Titan Nova Flask dashboard and WhatsApp gateway",
   "main": "Gateway.js",
@@ -8,7 +8,7 @@
     "web": "bash scripts/start_web.sh",
     "bot": "bash scripts/start_bot.sh",
     "start": "bash scripts/start_bot.sh",
-    "check:python": "python -m py_compile flask_app.py backend/wsgi.py scripts/health_check.py tests/test_structure.py",
+    "check:python": "python -m py_compile flask_app.py backend/run.py backend/wsgi.py scripts/health_check.py tests/test_structure.py",
     "check:node": "node --check Gateway.js && node --check bot/index.js && node --check ecosystem.config.js",
     "check": "npm run check:python && npm run check:node",
     "test": "python -m unittest discover -s tests -v",
