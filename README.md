@@ -1,88 +1,117 @@
 # Titan Nova
 
-Strict two-runtime-file mode:
+Production-oriented Flask dashboard and WhatsApp gateway for Termux, Linux, or PM2.
 
-1. `flask_app.py` — Flask dashboard/API.
-2. `Gateway.js` — WhatsApp gateway.
+## Project structure
 
-No extra Python runtime file is required.
+```text
+new-nova/
+├── flask_app.py                 # Flask dashboard/API runtime (compatibility entrypoint)
+├── Gateway.js                  # WhatsApp gateway runtime (compatibility entrypoint)
+├── backend/
+│   ├── __init__.py
+│   ├── wsgi.py                 # Gunicorn/WSGI entrypoint
+│   └── README.md
+├── bot/
+│   ├── index.js                # Structured Node entrypoint
+│   └── README.md
+├── config/
+│   └── README.md
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── DEPLOYMENT_TERMUX.md
+│   └── OPERATIONS.md
+├── scripts/
+│   ├── install_termux.sh
+│   ├── update_termux.sh
+│   ├── start_web.sh
+│   ├── start_bot.sh
+│   └── health_check.py
+├── tests/
+│   └── test_structure.py
+├── .github/workflows/ci.yml
+├── .env.example
+├── .gitignore
+├── ecosystem.config.js
+├── package.json
+├── requirements.txt
+└── Procfile
+```
 
-## Termux update
+The two original runtime entrypoints remain available so existing Termux commands do not break. New operational files are separated into clear backend, bot, configuration, deployment, documentation, and test layers.
+
+## First installation in Termux
+
+```bash
+cd ~
+git clone https://github.com/kirannayakcontact-spec/new-nova.git
+cd new-nova
+bash scripts/install_termux.sh
+cp .env.example .env
+```
+
+Edit `.env` with your Firebase URL and runtime settings.
+
+## Start manually
+
+Open two Termux sessions.
+
+Session 1:
 
 ```bash
 cd ~/new-nova
-git pull
-pip install -r requirements.txt
-npm install
+bash scripts/start_web.sh
 ```
 
-## Run web app
+Session 2:
 
 ```bash
 cd ~/new-nova
-npm run web
+bash scripts/start_bot.sh
 ```
 
-This runs:
+Dashboard: `http://127.0.0.1:5000`
+
+Gateway health: `http://127.0.0.1:3000/health`
+
+## Update with one command
 
 ```bash
-python flask_app.py
+cd ~/new-nova && bash scripts/update_termux.sh
 ```
 
-Open:
+The script pulls the latest `main`, refreshes Python and Node dependencies, and reloads PM2 when PM2 is installed.
 
-```text
-http://127.0.0.1:5000
-```
-
-## Run WhatsApp gateway
-
-Open a second Termux session:
+## PM2 mode
 
 ```bash
-cd ~/new-nova
-npm run bot
+npm install -g pm2
+pm run pm2:start
+pm2 save
 ```
 
-This runs:
+Useful commands:
 
 ```bash
-node Gateway.js
+npm run pm2:status
+npm run pm2:logs
+npm run pm2:restart
 ```
 
-## Setup Control Center target
+## Validation
 
-The final Setup tab must live inside `flask_app.py`, not in a separate Python runtime file.
-
-Required Firebase path:
-
-```text
-settings/setup
+```bash
+npm run check
+python -m unittest discover -s tests -v
+python scripts/health_check.py
 ```
 
-Required API routes:
+## Production entrypoint
 
-```text
-GET  /api/setup/load
-POST /api/setup/save
-POST /api/setup/test-firebase
-POST /api/setup/market/add
-POST /api/setup/market/save
-POST /api/setup/market/delete
-POST /api/setup/backup/download
-POST /api/setup/backup/restore
-GET  /api/setup/status
+For a Linux server with Gunicorn:
+
+```bash
+gunicorn --bind 0.0.0.0:5000 backend.wsgi:app
 ```
 
-## Current repo cleanup
-
-- Removed the extra `setup_control_center.py` runtime file.
-- `npm run web` now points to `python flask_app.py`.
-- `npm run bot` points to `node Gateway.js`.
-
-## Important
-
-Keep future upgrades inside the two runtime files only:
-
-- Python changes go into `flask_app.py`.
-- WhatsApp changes go into `Gateway.js`.
+See `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT_TERMUX.md`, and `docs/OPERATIONS.md` for details.
