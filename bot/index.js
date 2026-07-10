@@ -1,6 +1,5 @@
 "use strict";
 
-// Security/integrity preload must run before the legacy gateway imports axios
-// and creates its Express application.
-require("./runtime_guard").prepareGatewayRuntime();
+// Structured entrypoint. The gateway remains at repository root to preserve
+// the existing WhatsApp auth_info_baileys directory and Termux compatibility.
 require("../Gateway.js");
