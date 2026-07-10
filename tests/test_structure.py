@@ -14,6 +14,7 @@ class ProjectStructureTests(unittest.TestCase):
         required = [
             "flask_app.py",
             "Gateway.js",
+            "gateway/roleRouter.js",
             "backend/run.py",
             "backend/wsgi.py",
             "bot/index.js",
@@ -36,6 +37,18 @@ class ProjectStructureTests(unittest.TestCase):
         scripts = package.get("scripts", {})
         for name in ("web", "bot", "check", "test", "pm2:start"):
             self.assertIn(name, scripts)
+        self.assertIn("gateway/roleRouter.js", scripts.get("check:node", ""))
+
+    def test_role_router_environment_keys_are_documented(self) -> None:
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        for key in (
+            "ROLE_ROUTER_ENABLED",
+            "KALYAN_ADMIN_GROUP",
+            "KALYAN_INTEL_GROUP",
+            "KALYAN_RESULT_GROUP",
+            "BOOKIE_LOAD_REPORT_GROUP",
+        ):
+            self.assertIn(key, env_example)
 
     def test_nova_command_has_expected_actions(self) -> None:
         content = (ROOT / "scripts/nova.sh").read_text(encoding="utf-8")
