@@ -6,10 +6,11 @@ Production-oriented Flask dashboard and WhatsApp gateway for Termux, Linux, or P
 
 ```text
 new-nova/
-├── flask_app.py                 # Flask dashboard/API runtime (compatibility entrypoint)
-├── Gateway.js                  # WhatsApp gateway runtime (compatibility entrypoint)
+├── flask_app.py                 # Flask dashboard/API compatibility runtime
+├── Gateway.js                  # WhatsApp gateway compatibility runtime
 ├── backend/
 │   ├── __init__.py
+│   ├── run.py                  # Environment-aware Termux/development launcher
 │   ├── wsgi.py                 # Gunicorn/WSGI entrypoint
 │   └── README.md
 ├── bot/
@@ -38,7 +39,7 @@ new-nova/
 └── Procfile
 ```
 
-The two original runtime entrypoints remain available so existing Termux commands do not break. New operational files are separated into clear backend, bot, configuration, deployment, documentation, and test layers.
+The original runtime entrypoints remain available so existing Termux commands do not break. Operational files are separated into backend, bot, configuration, deployment, documentation, and test layers.
 
 ## First installation in Termux
 
@@ -47,10 +48,9 @@ cd ~
 git clone https://github.com/kirannayakcontact-spec/new-nova.git
 cd new-nova
 bash scripts/install_termux.sh
-cp .env.example .env
 ```
 
-Edit `.env` with your Firebase URL and runtime settings.
+The installer creates `.env` from `.env.example` when it is missing. Edit `.env` and set the correct Firebase URL before production use.
 
 ## Start manually
 
@@ -80,13 +80,13 @@ Gateway health: `http://127.0.0.1:3000/health`
 cd ~/new-nova && bash scripts/update_termux.sh
 ```
 
-The script pulls the latest `main`, refreshes Python and Node dependencies, and reloads PM2 when PM2 is installed.
+The script pulls the latest branch, refreshes Python and Node dependencies, runs validation, and reloads PM2 when PM2 is installed.
 
 ## PM2 mode
 
 ```bash
 npm install -g pm2
-pm run pm2:start
+npm run pm2:start
 pm2 save
 ```
 
@@ -102,7 +102,7 @@ npm run pm2:restart
 
 ```bash
 npm run check
-python -m unittest discover -s tests -v
+npm test
 python scripts/health_check.py
 ```
 

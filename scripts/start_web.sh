@@ -12,6 +12,6 @@ if [[ -f .env ]]; then
 fi
 
 export APP_TZ="${APP_TZ:-Asia/Kolkata}"
-export PORT="${WEB_PORT:-${PORT:-5000}}"
+export WEB_PORT="${WEB_PORT:-${PORT:-5000}}"
 
-exec python flask_app.py
+exec python -m backend.run
