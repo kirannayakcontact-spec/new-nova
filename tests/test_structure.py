@@ -15,6 +15,7 @@ class ProjectStructureTests(unittest.TestCase):
             "flask_app.py",
             "Gateway.js",
             "gateway/roleRouter.js",
+            "gateway/roleRouterUi.js",
             "backend/run.py",
             "backend/wsgi.py",
             "bot/index.js",
@@ -38,6 +39,7 @@ class ProjectStructureTests(unittest.TestCase):
         for name in ("web", "bot", "check", "test", "pm2:start"):
             self.assertIn(name, scripts)
         self.assertIn("gateway/roleRouter.js", scripts.get("check:node", ""))
+        self.assertIn("gateway/roleRouterUi.js", scripts.get("check:node", ""))
 
     def test_role_router_environment_keys_are_documented(self) -> None:
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
@@ -49,6 +51,11 @@ class ProjectStructureTests(unittest.TestCase):
             "BOOKIE_LOAD_REPORT_GROUP",
         ):
             self.assertIn(key, env_example)
+
+    def test_role_router_ui_is_preloaded(self) -> None:
+        content = (ROOT / "scripts/start_bot.sh").read_text(encoding="utf-8")
+        self.assertIn("gateway/roleRouter.js", content)
+        self.assertIn("gateway/roleRouterUi.js", content)
 
     def test_nova_command_has_expected_actions(self) -> None:
         content = (ROOT / "scripts/nova.sh").read_text(encoding="utf-8")
