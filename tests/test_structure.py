@@ -18,6 +18,7 @@ class ProjectStructureTests(unittest.TestCase):
             "gateway/roleRouterUi.js",
             "backend/run.py",
             "backend/wsgi.py",
+            "backend/role_router_proxy.py",
             "bot/index.js",
             "scripts/nova.sh",
             "scripts/install_nova_command.sh",
@@ -30,7 +31,13 @@ class ProjectStructureTests(unittest.TestCase):
         self.assertEqual(missing, [], f"Missing required files: {missing}")
 
     def test_python_entrypoints_compile(self) -> None:
-        for relative in ("flask_app.py", "backend/run.py", "backend/wsgi.py", "scripts/health_check.py"):
+        for relative in (
+            "flask_app.py",
+            "backend/run.py",
+            "backend/wsgi.py",
+            "backend/role_router_proxy.py",
+            "scripts/health_check.py",
+        ):
             py_compile.compile(str(ROOT / relative), doraise=True)
 
     def test_package_scripts_exist(self) -> None:
@@ -40,6 +47,7 @@ class ProjectStructureTests(unittest.TestCase):
             self.assertIn(name, scripts)
         self.assertIn("gateway/roleRouter.js", scripts.get("check:node", ""))
         self.assertIn("gateway/roleRouterUi.js", scripts.get("check:node", ""))
+        self.assertIn("backend/role_router_proxy.py", scripts.get("check:python", ""))
 
     def test_role_router_environment_keys_are_documented(self) -> None:
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
@@ -56,6 +64,23 @@ class ProjectStructureTests(unittest.TestCase):
         content = (ROOT / "scripts/start_bot.sh").read_text(encoding="utf-8")
         self.assertIn("gateway/roleRouter.js", content)
         self.assertIn("gateway/roleRouterUi.js", content)
+
+    def test_role_router_is_global_not_market_scoped(self) -> None:
+        content = (ROOT / "gateway/roleRouter.js").read_text(encoding="utf-8")
+        self.assertNotIn("kalyanOnly", content)
+        self.assertIn("Entry card ignored outside configured Entry Target", content)
+        self.assertIn('for (const store of ["data", "pannelData", "jodiData"])', content)
+
+    def test_role_router_ui_parses_json_and_uses_isolated_storage(self) -> None:
+        content = (ROOT / "gateway/roleRouterUi.js").read_text(encoding="utf-8")
+        self.assertIn('originalExpress.json({ limit: "256kb" })', content)
+        self.assertIn("/titan_role_router/targets.json", content)
+        self.assertIn("effectiveConfig", content)
+
+    def test_flask_dashboard_registers_role_router_proxy(self) -> None:
+        for relative in ("backend/run.py", "backend/wsgi.py"):
+            content = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn("register_role_router_proxy", content)
 
     def test_nova_command_has_expected_actions(self) -> None:
         content = (ROOT / "scripts/nova.sh").read_text(encoding="utf-8")
