@@ -43,5 +43,6 @@ jobs:
           node-version: "20"
       - run: npm install --package-lock=false --ignore-scripts
       - run: node --check Gateway.js
+      - run: node --check gateway/roleRouter.js
       - run: node --check bot/index.js
       - run: node --check ecosystem.config.js
