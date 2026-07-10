@@ -20,6 +20,8 @@ Run syntax checks and tests
 Start or reload titan-web and titan-gateway with PM2
 Save PM2 process list
 Show service and health status
+Wait until the dashboard is ready
+Open http://127.0.0.1:5000 automatically in Chrome
 ```
 
 Useful controls:
@@ -29,6 +31,14 @@ nova restart
 nova status
 nova logs
 nova stop
+```
+
+`nova restart` also opens the dashboard in Chrome after the services are ready.
+
+To disable automatic browser opening for one run:
+
+```bash
+NOVA_OPEN_BROWSER=0 nova
 ```
 
 ## Install the `nova` command on an existing clone
