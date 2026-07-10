@@ -1,0 +1,34 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# WhatsApp sessions and runtime state
+auth_info_baileys/
+whatsapp_targets_cache.json
+titan_schedule_sent_log.json
+titan_spam_guard_state.json
+titan_result_scrape_confirm.json
+titan_live_result_state.json
+
+# Logs and process state
+logs/
+*.log
+.pm2/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

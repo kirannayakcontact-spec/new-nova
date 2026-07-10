@@ -1,1 +1,32 @@
-{"name":"titan-nova-gateway","version":"1.0.4","description":"Titan Nova strict two-file runner","main":"Gateway.js","scripts":{"web":"python flask_app.py","bot":"node Gateway.js","start":"node Gateway.js","patch-setup":"python apply_setup_control_center_patch.py"},"dependencies":{"@whiskeysockets/baileys":"^6.7.18","axios":"^1.7.9","cors":"^2.8.5","express":"^4.18.3","pino":"^9.5.0","qrcode-terminal":"^0.12.0"}}
+{
+  "name": "titan-nova",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Titan Nova Flask dashboard and WhatsApp gateway",
+  "main": "Gateway.js",
+  "scripts": {
+    "web": "bash scripts/start_web.sh",
+    "bot": "bash scripts/start_bot.sh",
+    "start": "bash scripts/start_bot.sh",
+    "check:python": "python -m py_compile flask_app.py backend/wsgi.py scripts/health_check.py tests/test_structure.py",
+    "check:node": "node --check Gateway.js && node --check bot/index.js && node --check ecosystem.config.js",
+    "check": "npm run check:python && npm run check:node",
+    "test": "python -m unittest discover -s tests -v",
+    "pm2:start": "pm2 start ecosystem.config.js",
+    "pm2:restart": "pm2 restart ecosystem.config.js --update-env",
+    "pm2:status": "pm2 status",
+    "pm2:logs": "pm2 logs"
+  },
+  "engines": {
+    "node": ">=18",
+    "python": ">=3.10"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.18",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "express": "^4.18.3",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
